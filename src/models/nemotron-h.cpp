@@ -221,6 +221,8 @@ llama_model_nemotron_h::graph::graph(const llama_model & model, const llm_graph_
     const bool extract_final_inp = (size_t) n_layer < cparams.embeddings_layer_inp.size() && cparams.embeddings_layer_inp[n_layer];
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         res->t_layer_inp[il] = inpL;
 
         struct ggml_tensor * inpSA = inpL;
@@ -250,6 +252,7 @@ llama_model_nemotron_h::graph::graph(const llama_model & model, const llm_graph_
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
 
     cur = inpL;
