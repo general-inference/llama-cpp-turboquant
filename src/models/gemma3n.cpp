@@ -127,6 +127,8 @@ llama_model_gemma3n::graph::graph(const llama_model & model, const llm_graph_par
     // inpL now has shape: [n_embd, n_tokens, n_altup]
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         // this block is made to be closely resemble Gemma3p5DecoderLayer on python code
         const float freq_base_l  = model.get_rope_freq_base(cparams, il);
         const float freq_scale_l = model.get_rope_freq_scale(cparams, il);
@@ -262,6 +264,7 @@ llama_model_gemma3n::graph::graph(const llama_model & model, const llm_graph_par
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
     cur = inpL;  // [n_embd, n_tokens, n_altup]
 
