@@ -265,6 +265,8 @@ llama_model_clef::graph::graph(const llama_model & model_base, const llm_graph_p
     res->add_input(std::move(inp_decision_ptr));
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         ggml_tensor * inpSA = inpL;
 
         cur = build_norm(inpL, model.layers[il].attn_norm, nullptr, LLM_NORM_RMS, il);
@@ -296,6 +298,7 @@ llama_model_clef::graph::graph(const llama_model & model_base, const llm_graph_p
         cb(cur, "l_out", il);
 
         inpL = cur;
+        end_block(inpL, il);
     }
 
     cur = build_norm(inpL, model.output_norm, nullptr, LLM_NORM_RMS, -1);

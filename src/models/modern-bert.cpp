@@ -160,6 +160,8 @@ llama_model_modern_bert::graph::graph(const llama_model & model, const llm_graph
     const int n_layer_enc = n_layer - n_layer_dec;
 
     for (int il = 0; il < n_layer_enc; ++il) {
+        begin_block(inpL, il);
+
         const float freq_base_l  = model.get_rope_freq_base(cparams, il);
         const float freq_scale_l = model.get_rope_freq_scale(cparams, il);
 
@@ -227,6 +229,7 @@ llama_model_modern_bert::graph::graph(const llama_model & model, const llm_graph
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
 
     cur = inpL;

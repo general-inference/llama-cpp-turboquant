@@ -131,6 +131,8 @@ llama_model_t5::graph<false>::graph(const llama_model & model, const llm_graph_p
     const int64_t dec_n_layer = hparams.dec_n_layer;
 
     for (int il = 0; il < dec_n_layer; ++il) {
+        begin_block(inpL, il);
+
         ggml_tensor * inpSA = inpL;
 
         // norm
@@ -241,6 +243,7 @@ llama_model_t5::graph<false>::graph(const llama_model & model, const llm_graph_p
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
     cur = inpL;
     cb(cur, "result_embd", -1);
@@ -277,6 +280,8 @@ llama_model_t5::graph<true>::graph(const llama_model & model, const llm_graph_pa
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         ggml_tensor * inpSA = inpL;
 
         // norm
@@ -341,6 +346,7 @@ llama_model_t5::graph<true>::graph(const llama_model & model, const llm_graph_pa
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
     cur = inpL;
     cb(cur, "result_embd", -1);

@@ -78,6 +78,8 @@ llama_model_cogvlm::graph::graph(const llama_model & model, const llm_graph_para
     }
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         // get either the text or image weight tensors
         ggml_tensor *wqkv, *wo, *wo_s;
         ggml_tensor *ffn_gate, *ffn_down, *ffn_up;
@@ -144,6 +146,7 @@ llama_model_cogvlm::graph::graph(const llama_model & model, const llm_graph_para
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
 
     cur = inpL;

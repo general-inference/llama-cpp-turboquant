@@ -64,6 +64,8 @@ llama_model_openelm::graph::graph(const llama_model & model, const llm_graph_par
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         const int64_t n_head    = hparams.n_head(il);
         const int64_t n_head_kv = hparams.n_head_kv(il);
         const int64_t n_head_qkv = 2*n_head_kv + n_head;
@@ -151,6 +153,7 @@ llama_model_openelm::graph::graph(const llama_model & model, const llm_graph_par
         cb(cur, "l_out", il);
 
         inpL = cur;
+        end_block(inpL, il);
     }
     cur = inpL;
 

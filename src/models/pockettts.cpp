@@ -63,6 +63,8 @@ llama_model_pockettts::graph::graph(const llama_model & model, const llm_graph_p
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         cur = build_norm(inpL,
                 model.layers[il].attn_norm,
                 model.layers[il].attn_norm_b,
@@ -127,6 +129,7 @@ llama_model_pockettts::graph::graph(const llama_model & model, const llm_graph_p
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
 
     cur = build_norm(inpL,

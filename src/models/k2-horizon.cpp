@@ -229,6 +229,8 @@ llama_model_k2_horizon::graph::graph(const llama_model & model, const llm_graph_
     const float kq_scale = 1.0f / sqrtf(float(n_embd_head));
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         const auto & layer = model.layers[il];
 
         res->t_layer_inp[il] = inpL;
@@ -347,6 +349,7 @@ llama_model_k2_horizon::graph::graph(const llama_model & model, const llm_graph_
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
 
     cur = k2_horizon_group_rms_norm(ctx0, inpL, model.output_norm, hparams.n_norm_groups, hparams.f_norm_rms_eps);

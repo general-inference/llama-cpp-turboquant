@@ -63,6 +63,8 @@ llama_model_dbrx::graph::graph(const llama_model & model, const llm_graph_params
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         ggml_tensor * inpSA = inpL;
 
         // norm
@@ -133,6 +135,7 @@ llama_model_dbrx::graph::graph(const llama_model & model, const llm_graph_params
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
 
     cur = inpL;

@@ -82,6 +82,8 @@ llama_model_maion_coder::graph::graph(const llama_model & model, const llm_graph
     const float kq_scale = 1.0f / sqrtf(float(n_embd_head));
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         // export per-layer input hidden state so speculative drafts (e.g. dflash/eagle3) can read it
         res->t_layer_inp[il] = inpL;
 
@@ -138,6 +140,7 @@ llama_model_maion_coder::graph::graph(const llama_model & model, const llm_graph
         cur = ggml_add(ctx0, cur, ffn_inp);
         cur = build_cvec(cur, il);
         inpL = cur;
+        end_block(inpL, il);
     }
 
     ggml_tensor * cur = build_norm(inpL, model.output_norm, NULL, LLM_NORM_RMS, -1);

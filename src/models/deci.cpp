@@ -99,6 +99,8 @@ llama_model_deci::graph::graph(const llama_model & model, const llm_graph_params
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         ggml_tensor * inpSA     = inpL;
         const int64_t n_head_kv = hparams.n_head_kv(il);
         const int64_t n_head    = hparams.n_head(il);
@@ -145,6 +147,7 @@ llama_model_deci::graph::graph(const llama_model & model, const llm_graph_params
         }
         // FFN-free layer of Llama-3_1-Nemotron-Ultra-253B
         if (n_ff == 0) {
+            end_block(inpL, il);
             continue;
         }
         // modified to support attention-free layer of Llama-3_1-Nemotron-51B
@@ -173,6 +176,7 @@ llama_model_deci::graph::graph(const llama_model & model, const llm_graph_params
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
     cur = inpL;
 

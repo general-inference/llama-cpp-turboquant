@@ -97,6 +97,8 @@ llama_model_gemma_embedding2::graph::graph(const llama_model & model, const llm_
     ggml_tensor * inp_per_layer = build_inp_per_layer(inpL);
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         const int64_t n_embd_head = hparams.n_embd_head_k(il);
         const int64_t n_head      = hparams.n_head(il);
         const int64_t n_head_kv   = hparams.n_head_kv(il);
@@ -201,6 +203,7 @@ llama_model_gemma_embedding2::graph::graph(const llama_model & model, const llm_
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
 
     cur = build_norm(inpL, model.output_norm, nullptr, LLM_NORM_RMS, -1);

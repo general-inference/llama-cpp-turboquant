@@ -497,6 +497,8 @@ llama_model_diffusion_gemma::graph::graph(const llama_model & model, const llm_g
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         const int64_t n_embd_head = hparams.n_embd_head_k(il);
         GGML_ASSERT(n_embd_head == hparams.n_embd_head_v(il));
         const int64_t n_head_kv = hparams.n_head_kv(il);
@@ -592,6 +594,7 @@ llama_model_diffusion_gemma::graph::graph(const llama_model & model, const llm_g
         cb(cur, "l_out", il);
 
         inpL = cur;
+        end_block(inpL, il);
     }
 
     cur = inpL;

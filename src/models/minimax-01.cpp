@@ -239,6 +239,8 @@ llama_model_minimax_01::graph::graph(const llama_model & model, const llm_graph_
     ggml_tensor * slopes = la->inp_slopes;
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         res->t_layer_inp[il] = inpL;
 
         ggml_tensor * inpSA = inpL;
@@ -464,6 +466,7 @@ llama_model_minimax_01::graph::graph(const llama_model & model, const llm_graph_
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
 
     cur = inpL;

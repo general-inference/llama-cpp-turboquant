@@ -62,6 +62,8 @@ llama_model_talkie::graph::graph(const llama_model & model, const llm_graph_para
     const float kq_scale = 1.0f / sqrtf(float(n_embd_head));
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         ggml_tensor * inpSA = inpL;
         ggml_tensor * inp_skip = embd_skip;
 
@@ -130,6 +132,7 @@ llama_model_talkie::graph::graph(const llama_model & model, const llm_graph_para
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
 
     cur = inpL;

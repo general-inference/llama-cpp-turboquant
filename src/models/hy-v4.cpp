@@ -519,6 +519,8 @@ llama_model_hy_v4::graph::graph(const llama_model & model, const llm_graph_param
     cb(inpL, "hc_init", -1);
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         ggml_tensor * residual = inpL;
         ggml_tensor * post = nullptr;
 
@@ -577,6 +579,7 @@ llama_model_hy_v4::graph::graph(const llama_model & model, const llm_graph_param
 
         inpL = build_hc_post(cur, residual, post, il);
         cb(inpL, "l_out", il);
+        end_block(inpL, il);
     }
 
     // prune to the requested output rows once, after all HC streams are done

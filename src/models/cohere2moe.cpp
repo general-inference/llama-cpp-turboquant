@@ -157,6 +157,8 @@ llama_model_cohere2moe::graph::graph(const llama_model & model, const llm_graph_
 
     // MTP/NextN layers are loaded as extra decoder blocks but not executed in the main pass.
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         const bool is_swa = hparams.is_swa(il);
         // Dense-prefix full-attention layers use RoPE; later layers follow the SWA pattern.
         const bool force_rope = static_cast<uint32_t>(il) < hparams.n_layer_dense_lead;
@@ -252,6 +254,7 @@ llama_model_cohere2moe::graph::graph(const llama_model & model, const llm_graph_
         cb(cur, "l_out", il);
 
         inpL = cur;
+        end_block(inpL, il);
     }
 
     cur = inpL;

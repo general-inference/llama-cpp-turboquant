@@ -174,6 +174,8 @@ llama_model_dots3note::graph::graph(const llama_model & model, const llm_graph_p
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         ggml_tensor * inpSA = inpL;
 
         const bool is_swa = hparams.is_swa(il);
@@ -458,6 +460,7 @@ llama_model_dots3note::graph::graph(const llama_model & model, const llm_graph_p
         cb(cur, "l_out", il);
 
         inpL = cur;
+        end_block(inpL, il);
     }
 
     cur = inpL;
