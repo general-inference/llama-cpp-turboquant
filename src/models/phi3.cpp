@@ -89,6 +89,8 @@ llama_model_phi3::graph<iswa>::graph(const llama_model & model, const llm_graph_
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         auto * residual = inpL;
 
         // self-attention
@@ -170,6 +172,7 @@ llama_model_phi3::graph<iswa>::graph(const llama_model & model, const llm_graph_
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
     cur = build_norm(inpL,
             model.output_norm,
