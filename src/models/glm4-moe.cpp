@@ -305,6 +305,8 @@ llama_model_glm4_moe::graph::graph(const llama_model & model, const llm_graph_pa
 
     // NextN layers are processed by graph_mtp.
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         ggml_tensor * inpSA = inpL;
 
         // Pre-attention norm
@@ -409,6 +411,7 @@ llama_model_glm4_moe::graph::graph(const llama_model & model, const llm_graph_pa
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
     cur = inpL;
     cur = build_norm(cur, model.output_norm, NULL, LLM_NORM_RMS, -1);
