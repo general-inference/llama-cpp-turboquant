@@ -25,6 +25,8 @@ llama_model_ernie4_5_moe::graph::graph(const llama_model & model, const llm_grap
 
     GGML_ASSERT(hparams.n_moe_layer_step > 0 && "Ernie 4.5 MoE requires n_moe_layer_step > 0");
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         ggml_tensor * inpSA = inpL;
         // norm
         {
@@ -115,6 +117,7 @@ llama_model_ernie4_5_moe::graph::graph(const llama_model & model, const llm_grap
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
     cur = inpL;
 
