@@ -105,6 +105,8 @@ llama_model_exaone4::graph<iswa>::graph(const llama_model & model, const llm_gra
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         ggml_tensor * inpSA = inpL;
 
         // use RoPE for SWA layers or non-SWA models
@@ -168,6 +170,7 @@ llama_model_exaone4::graph<iswa>::graph(const llama_model & model, const llm_gra
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
     cur = inpL;
 
