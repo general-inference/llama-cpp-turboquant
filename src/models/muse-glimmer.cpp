@@ -76,6 +76,8 @@ llama_model_muse_glimmer::graph::graph(const llama_model & model, const llm_grap
     const float kq_scale = 1.0f / sqrtf(float(n_embd_head));
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         // expose per-layer residual for speculative drafts (see LLM_KV_TARGET_LAYERS).
         res->t_layer_inp[il] = inpL;
 
@@ -172,6 +174,7 @@ llama_model_muse_glimmer::graph::graph(const llama_model & model, const llm_grap
         cb(cur, "l_out", il);
 
         inpL = cur;
+        end_block(inpL, il);
     }
 
     cur = inpL;
