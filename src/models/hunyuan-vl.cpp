@@ -83,6 +83,8 @@ llama_model_hunyuan_vl::graph::graph(const llama_model & model, const llm_graph_
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         res->t_layer_inp[il] = inpL;
 
         ggml_tensor * inpSA = inpL;
@@ -173,6 +175,7 @@ llama_model_hunyuan_vl::graph::graph(const llama_model & model, const llm_graph_
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
     cur = inpL;
 
