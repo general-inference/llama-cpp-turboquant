@@ -67,6 +67,8 @@ llama_model_cohere2::graph::graph(const llama_model & model, const llm_graph_par
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         const bool is_swa = hparams.is_swa(il);
         // UNUSED:
         // const float freq_base_l  = model.get_rope_freq_base (cparams, il);
@@ -136,6 +138,7 @@ llama_model_cohere2::graph::graph(const llama_model & model, const llm_graph_par
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
 
     cur = inpL;
