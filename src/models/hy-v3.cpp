@@ -112,6 +112,8 @@ llama_model_hy_v3::graph::graph(const llama_model & model, const llm_graph_param
 
     // MTP/NextN layers are loaded as extra decoder blocks but not executed in the main pass.
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         ggml_tensor * inpSA = inpL;
 
         cur = build_norm(inpL, model.layers[il].attn_norm, nullptr, LLM_NORM_RMS, il);
@@ -197,6 +199,7 @@ llama_model_hy_v3::graph::graph(const llama_model & model, const llm_graph_param
         cb(cur, "l_out", il);
 
         inpL = cur;
+        end_block(inpL, il);
     }
 
     cur = build_norm(inpL, model.output_norm, nullptr, LLM_NORM_RMS, -1);
