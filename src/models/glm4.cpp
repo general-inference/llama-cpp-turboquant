@@ -89,6 +89,8 @@ llama_model_glm4::graph::graph(const llama_model & model, const llm_graph_params
     // Only process up to last layer (skip final NextN layer)
     // Final layer tensors are loaded but not processed in forward pass
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         ggml_tensor * inpSA = inpL;
 
         // Pre-attention norm
@@ -164,6 +166,7 @@ llama_model_glm4::graph::graph(const llama_model & model, const llm_graph_params
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
     // Final norm
     cur = build_norm(inpL, model.output_norm, NULL, LLM_NORM_RMS, -1);
