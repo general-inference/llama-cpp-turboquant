@@ -153,6 +153,8 @@ llama_model_granite_hybrid::graph::graph(const llama_model & model, const llm_gr
     }
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         struct ggml_tensor * inpSA = inpL;
 
         // norm
@@ -177,6 +179,7 @@ llama_model_granite_hybrid::graph::graph(const llama_model & model, const llm_gr
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
 
     cur = inpL;
