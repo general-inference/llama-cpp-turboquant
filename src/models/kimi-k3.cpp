@@ -275,6 +275,8 @@ llama_model_kimi_k3::graph::graph(const llama_model & model, const llm_graph_par
     const int64_t  n_embd_latent = hparams.n_expert_latent > 0 ? hparams.n_expert_latent : n_embd;
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         const auto & layer = model.layers[il];
 
         // the residual stream, banked on checkpoint layers and then restarted
@@ -328,6 +330,7 @@ llama_model_kimi_k3::graph::graph(const llama_model & model, const llm_graph_par
         cb(prefix_sum, "l_out", il);
 
         inpL = prefix_sum;
+        end_block(inpL, il);
     }
 
     cur = inpL;
