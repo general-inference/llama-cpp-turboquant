@@ -316,6 +316,8 @@ llama_model_granite_switch::graph::graph(
     ggml_tensor * cur;
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         ggml_tensor * inpSA = inpL;
 
         cur = build_norm(inpL, model.layers[il].attn_norm, NULL, LLM_NORM_RMS, il);
@@ -336,6 +338,7 @@ llama_model_granite_switch::graph::graph(
         cur = build_layer_ffn(cur, inpSA, adapter_ids, model, il);
 
         inpL = cur;
+        end_block(inpL, il);
     }
 
     cur = inpL;
