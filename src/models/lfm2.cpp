@@ -302,6 +302,8 @@ llama_model_lfm2::graph<iswa>::graph(const llama_model & model, const llm_graph_
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(cur, il);
+
         res->t_layer_inp[il] = cur;
 
         const bool is_moe_layer = il >= static_cast<int>(hparams.n_layer_dense_lead);
@@ -331,6 +333,7 @@ llama_model_lfm2::graph<iswa>::graph(const llama_model & model, const llm_graph_
 
         cur = build_cvec(cur, il);
         cb(cur, "l_out", il);
+        end_block(cur, il);
     }
 
     cur = build_norm(cur, model.output_norm, NULL, LLM_NORM_RMS, -1);
@@ -444,6 +447,8 @@ llama_model_lfm2::graph_decision::graph_decision(const llama_model & model, cons
     res->add_input(std::move(inp_conv));
 
     for (int il = 0; il < n_layer_enc; ++il) {
+        begin_block(cur, il);
+
         const auto & layer = model.layers[il];
 
         ggml_tensor * inpL = cur;
@@ -505,6 +510,7 @@ llama_model_lfm2::graph_decision::graph_decision(const llama_model & model, cons
 
         cur = ggml_add(ctx0, cur, ffn_out);
         cb(cur, "l_out", il);
+        end_block(cur, il);
     }
 
     cur = build_norm(cur, model.output_norm, NULL, LLM_NORM_RMS, -1);
