@@ -645,8 +645,11 @@ llama_model_inkling::graph::graph(const llama_model & model, const llm_graph_par
     ggml_build_forward_expand(gf, cur);
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(cur, il);
+
         res->t_layer_inp[il] = cur;
         cur = build_block(cur, il);
+        end_block(cur, il);
     }
 
     ggml_tensor * inp_out_ids = build_inp_out_ids();
