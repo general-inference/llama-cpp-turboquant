@@ -101,6 +101,8 @@ llama_model_mimo2::graph::graph(const llama_model & model, const llm_graph_param
     const bool extract_final_inp = (size_t) n_layer < cparams.embeddings_layer_inp.size() && cparams.embeddings_layer_inp[n_layer];
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         res->t_layer_inp[il] = inpL;
 
         ggml_tensor * inpSA = inpL;
@@ -227,6 +229,7 @@ llama_model_mimo2::graph::graph(const llama_model & model, const llm_graph_param
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
 
     cur = inpL;
