@@ -447,6 +447,8 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
     ggml_build_forward_expand(gf, res_hc);
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(res_hc, il);
+
         res->t_layer_inp[il] = res_hc;
 
         if (hparams.is_ple(il)) {
@@ -495,6 +497,7 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
 
         // "l_last" is the layer output name that build_cvec and imatrix look for
         cb(res_hc, "l_last", il);
+        end_block(res_hc, il);
     }
 
     // the MTP head reads the hc-wide residual, before the final mixer
