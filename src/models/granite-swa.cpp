@@ -149,6 +149,8 @@ llama_model_granite_swa::graph::graph(
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
 
         // Granite Vision 4.1 deepstack: inject the projector stream that
         // targets decoder layer `il` before the decoder runs.
@@ -185,6 +187,7 @@ llama_model_granite_swa::graph::graph(
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
     cur = inpL;
 
