@@ -277,6 +277,8 @@ llama_model_kimi_linear::graph::graph(const llama_model & model, const llm_graph
     const float kq_scale_mla = 1.0f / sqrtf((float)n_embd_head_k_mla);
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         const auto & layer = model.layers[il];
         ggml_tensor * inpSA = inpL;
 
@@ -546,6 +548,7 @@ llama_model_kimi_linear::graph::graph(const llama_model & model, const llm_graph
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
     cur = inpL;
 
