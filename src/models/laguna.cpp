@@ -173,6 +173,8 @@ llama_model_laguna::graph::graph(const llama_model & model, const llm_graph_para
     const float kq_scale = 1.0f / sqrtf(float(n_embd_head));
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         const bool    is_swa_il   = hparams.is_swa(il);
         const int64_t n_head_il   = hparams.n_head(il);
         const int64_t n_head_kv_il = hparams.n_head_kv(il);
@@ -319,6 +321,7 @@ llama_model_laguna::graph::graph(const llama_model & model, const llm_graph_para
         cb(cur, "l_out", il);
 
         inpL = cur;
+        end_block(inpL, il);
     }
 
     cur = inpL;
