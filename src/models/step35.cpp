@@ -190,6 +190,8 @@ llama_model_step35::graph::graph(const llama_model & model, const llm_graph_para
 
     // MTP/NextN layers are loaded as extra decoder blocks but not executed in the main pass.
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         ggml_tensor * inpSA = inpL;
 
         const uint32_t n_head_l    = hparams.n_head(il);
@@ -333,6 +335,7 @@ llama_model_step35::graph::graph(const llama_model & model, const llm_graph_para
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
 
     cur = inpL;
