@@ -98,6 +98,8 @@ llama_model_rwkv6qwen2::graph::graph(const llama_model & model, const llm_graph_
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         const llama_layer * layer = &model.layers[il];
         inpL = ggml_reshape_3d(ctx0, inpL, n_embd, n_seq_tokens, n_seqs);
 
@@ -150,6 +152,7 @@ llama_model_rwkv6qwen2::graph::graph(const llama_model & model, const llm_graph_
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
 
     cur = inpL;
