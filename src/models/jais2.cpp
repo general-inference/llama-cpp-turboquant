@@ -71,6 +71,8 @@ llama_model_jais2::graph::graph(const llama_model & model, const llm_graph_param
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         // Pre-attention LayerNorm
         cur = build_norm(inpL,
                 model.layers[il].attn_norm,
@@ -134,6 +136,7 @@ llama_model_jais2::graph::graph(const llama_model & model, const llm_graph_param
         inpL = ggml_add(ctx0, cur, ffn_inp);
         inpL = build_cvec(inpL, il);
         cb(inpL, "l_out", il);
+        end_block(inpL, il);
     }
 
     // Final LayerNorm
