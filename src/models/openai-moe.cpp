@@ -73,6 +73,8 @@ llama_model_openai_moe::graph::graph(const llama_model & model, const llm_graph_
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         res->t_layer_inp[il] = inpL;
 
         const float freq_base_l  = model.get_rope_freq_base (cparams, il);
@@ -149,6 +151,7 @@ llama_model_openai_moe::graph::graph(const llama_model & model, const llm_graph_
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
     cur = inpL;
 
