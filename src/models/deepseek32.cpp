@@ -203,6 +203,8 @@ llama_model_deepseek32::graph::graph(const llama_model & model, const llm_graph_
     ggml_tensor * shared_top_k = nullptr;
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         ggml_tensor * inpSA = inpL;
 
         // norm
@@ -468,6 +470,7 @@ llama_model_deepseek32::graph::graph(const llama_model & model, const llm_graph_
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
     cur = inpL;
 
