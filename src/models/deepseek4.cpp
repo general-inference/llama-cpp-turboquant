@@ -1240,6 +1240,8 @@ llama_model_deepseek4::graph::graph(const llama_model & model, const llm_graph_p
     cb(inpL, "hc_init", -1);
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         if ((size_t) il < cparams.embeddings_layer_inp.size() && cparams.embeddings_layer_inp[il]) {
             res->t_layer_inp[il] = build_hc_mean(inpL);
             cb(res->t_layer_inp[il], "layer_inp", il);
@@ -1328,6 +1330,7 @@ llama_model_deepseek4::graph::graph(const llama_model & model, const llm_graph_p
         inpL = build_hc_post(cur, residual, post, comb, il);
         inpL = build_cvec(inpL, il);
         cb(inpL, "l_last", il);
+        end_block(inpL, il);
     }
 
     if ((size_t) n_layer < cparams.embeddings_layer_inp.size() && cparams.embeddings_layer_inp[n_layer]) {
