@@ -57,6 +57,8 @@ llama_model_gemma::graph::graph(const llama_model & model, const llm_graph_param
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         // norm
         cur = build_norm(inpL,
                 model.layers[il].attn_norm, NULL,
@@ -119,6 +121,7 @@ llama_model_gemma::graph::graph(const llama_model & model, const llm_graph_param
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
     cur = inpL;
 
