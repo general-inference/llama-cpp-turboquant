@@ -244,6 +244,8 @@ llama_model_bailingmoe3::graph::graph(const llama_model & model, const llm_graph
     GGML_ASSERT(ubatch.n_tokens == n_seq_tokens * n_seqs);
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         res->t_layer_inp[il] = inpL;
 
         const auto & layer = model.layers[il];
@@ -397,6 +399,7 @@ llama_model_bailingmoe3::graph::graph(const llama_model & model, const llm_graph
         cur = build_cvec(cur, il);
         cb(cur, "l_out", il);
         inpL = cur;
+        end_block(inpL, il);
     }
 
     ggml_tensor * cur = build_norm(inpL, model.output_norm, nullptr, LLM_NORM_RMS, -1);
