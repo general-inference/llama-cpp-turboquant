@@ -191,6 +191,8 @@ llama_model_gemma4::graph::graph(const llama_model & model, const llm_graph_para
     }
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         const int64_t n_embd_head = hparams.n_embd_head_k(il);
         GGML_ASSERT(n_embd_head == hparams.n_embd_head_v(il));
 
@@ -408,6 +410,7 @@ llama_model_gemma4::graph::graph(const llama_model & model, const llm_graph_para
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
     cur = inpL;
 
