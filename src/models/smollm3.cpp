@@ -64,6 +64,8 @@ llama_model_smollm3::graph::graph(const llama_model & model, const llm_graph_par
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         ggml_tensor * inpSA = inpL;
 
         const bool use_rope = (il + 1) % hparams.n_no_rope_layer_step != 0;
@@ -132,6 +134,7 @@ llama_model_smollm3::graph::graph(const llama_model & model, const llm_graph_par
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
     cur = inpL;
 
