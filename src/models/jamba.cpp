@@ -119,6 +119,8 @@ llama_model_jamba::graph::graph(const llama_model & model, const llm_graph_param
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
     for (int il = 0; il < n_layer; ++il) {
+        begin_block(inpL, il);
+
         const int64_t n_head_kv = hparams.n_head_kv(il);
 
         cur = build_norm(inpL, model.layers[il].attn_norm, NULL, LLM_NORM_RMS, il);
@@ -181,6 +183,7 @@ llama_model_jamba::graph::graph(const llama_model & model, const llm_graph_param
 
         // input for next layer
         inpL = cur;
+        end_block(inpL, il);
     }
     // final rmsnorm
     cur = build_norm(inpL, model.output_norm, NULL, LLM_NORM_RMS, -1);
