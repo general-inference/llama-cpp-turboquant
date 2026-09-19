@@ -3401,9 +3401,26 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
     ggml_tensor * cur;
 
-    const bool use_flash_attn = cparams.flash_attn && kq_b == nullptr;
+    // backends without a fused-bias flash-attention kernel (e.g. Metal for the
+    // banded op) can still run FA by folding the additive KQ bias into the mask
+    const bool fold_kq_b_into_mask = cparams.flash_attn && kq_b != nullptr && kq_mask != nullptr &&
+            arch == LLM_ARCH_INKLING;
+    const bool use_flash_attn = cparams.flash_attn && (kq_b == nullptr || fold_kq_b_into_mask);
     if (use_flash_attn) {
-        GGML_ASSERT(kq_b == nullptr && "Flash attention does not support KQ bias yet");
+        ggml_tensor * fa_mask = kq_mask;
+        if (fold_kq_b_into_mask) {
+            ggml_tensor * bias = ggml_cont(ctx0, kq_b);
+            GGML_ASSERT(kq_mask->ne[1] >= bias->ne[1]);
+            if (kq_mask->ne[1] > bias->ne[1]) {
+                // the FA mask rows are padded; pad the bias with zeros to match
+                bias = ggml_pad(ctx0, bias, 0, (int)(kq_mask->ne[1] - bias->ne[1]), 0, 0);
+            }
+            // Metal adds F32 tensors, while FA consumes an F16 mask. Keep the
+            // dense bias construction on-device, then cast the combined mask.
+            ggml_tensor * mask_f32 = ggml_cast(ctx0, kq_mask, GGML_TYPE_F32);
+            fa_mask = ggml_cast(ctx0, ggml_add(ctx0, bias, mask_f32), GGML_TYPE_F16);
+            cb(fa_mask, "kq_mask_biased", il);
+        }
 
         if (v_trans) {
             v = ggml_transpose(ctx0, v);

@@ -487,6 +487,78 @@ private:
 };
 
 
+static clip_image_u8 mtmd_inkling_resize(const clip_image_u8 & img, resize_algo algo) {
+    constexpr int patch_size = 40;
+    const clip_image_size source_size = img.get_size();
+    const clip_image_size target_size = {
+        std::max(patch_size, ((source_size.width + patch_size - 1) / patch_size) * patch_size),
+        std::max(patch_size, ((source_size.height + patch_size - 1) / patch_size) * patch_size),
+    };
+
+    clip_image_u8 resized;
+    img_tool::resize(img, resized, target_size, algo, PAD_CEIL);
+    return resized;
+}
+
+mtmd_inkling_image_preproc_out mtmd_image_preprocess_inkling(
+        const clip_image_u8 & img,
+        resize_algo algo) {
+    constexpr int patch_size = 40;
+    constexpr int temporal_patch_size = 2;
+
+    const clip_image_u8 resized = mtmd_inkling_resize(img, algo);
+    const clip_image_size resized_size = resized.get_size();
+    mtmd_inkling_image_preproc_out output;
+    output.source_size = img.get_size();
+    output.resized_size = resized_size;
+    output.patch_rows = resized_size.height / patch_size;
+    output.patch_cols = resized_size.width / patch_size;
+    output.resized_rgb = resized.get_ro_buf();
+    output.pixel_values_bthwc.reserve(
+        (size_t) output.patch_rows * output.patch_cols * temporal_patch_size * patch_size * patch_size * 3);
+
+    for (int row = 0; row < output.patch_rows; ++row) {
+        for (int col = 0; col < output.patch_cols; ++col) {
+            for (int temporal = 0; temporal < temporal_patch_size; ++temporal) {
+                (void) temporal;
+                for (int y = 0; y < patch_size; ++y) {
+                    for (int x = 0; x < patch_size; ++x) {
+                        const auto pixel = resized.get_pixel(col * patch_size + x, row * patch_size + y);
+                        output.pixel_values_bthwc.push_back((float) pixel[0] / 255.0f);
+                        output.pixel_values_bthwc.push_back((float) pixel[1] / 255.0f);
+                        output.pixel_values_bthwc.push_back((float) pixel[2] / 255.0f);
+                    }
+                }
+            }
+        }
+    }
+
+    return output;
+}
+
+mtmd_image_preproc_out mtmd_image_preprocessor_inkling::preprocess(const clip_image_u8 & img) const {
+    constexpr int patch_size = 40;
+    constexpr int temporal_patch_size = 2;
+
+    const clip_image_u8 resized = mtmd_inkling_resize(img, hparams.image_resize_algo);
+    const clip_image_size resized_size = resized.get_size();
+    const int patch_rows = resized_size.height / patch_size;
+    const int patch_cols = resized_size.width / patch_size;
+
+    mtmd_image_preproc_out output;
+    output.entries.reserve((size_t) patch_rows * patch_cols * temporal_patch_size);
+    for (int row = 0; row < patch_rows; ++row) {
+        for (int col = 0; col < patch_cols; ++col) {
+            clip_image_u8 patch;
+            img_tool::crop(resized, patch, col * patch_size, row * patch_size, patch_size, patch_size);
+            output.append(hparams, patch, true);
+            output.append(hparams, patch, true);
+        }
+    }
+    return output;
+}
+
+
 //
 // mtmd_image_preprocessor_llava_uhd
 //

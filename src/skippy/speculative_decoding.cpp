@@ -7,6 +7,7 @@
 #include "skippy/sampling_internal.h"
 #include "skippy/speculative_internal.h"
 
+#include "llama-arch.h"
 #include "llama-context.h"
 #include "llama-graph.h"
 #include "llama-impl.h"
@@ -23,10 +24,28 @@
 
 thread_local skippy_session * g_skippy_external_decode_session = nullptr;
 
+// This semantic identity belongs to the Inkling MTP producer/consumer. The
+// activation transport treats it as an ordinary optional typed part.
+static constexpr uint8_t SKIPPY_MTP_INPUT_EMBEDDING_IDENTITY[SKIPPY_ACTIVATION_IDENTITY_BYTES] = {
+    0x0d, 0x5b, 0x22, 0xa5, 0xde, 0x94, 0xde, 0x79,
+    0x94, 0xcb, 0x12, 0x03, 0x9a, 0x51, 0xd3, 0x41,
+    0x4d, 0x8a, 0x65, 0x4f, 0x67, 0xbc, 0x21, 0xdb,
+    0x43, 0x58, 0x56, 0xf7, 0x8c, 0x52, 0x9c, 0x89,
+};
+
 const float * skippy_mtp_input_embeddings_from_activation_frame(
-        const skippy_activation_desc *,
-        const void *,
-        size_t) {
+        const skippy_activation_desc * desc,
+        const void * payload,
+        size_t token_count) {
+    if (desc == nullptr || payload == nullptr) return nullptr;
+    for (uint32_t index = 0; index < desc->part_count; ++index) {
+        const auto & part = desc->parts[index];
+        if (std::memcmp(part.identity, SKIPPY_MTP_INPUT_EMBEDDING_IDENTITY, sizeof(part.identity)) != 0) continue;
+        if (part.ggml_type != GGML_TYPE_F32 || part.rank != 2 || part.token_axis != 1 ||
+                part.dimensions[1] != static_cast<int64_t>(token_count) ||
+                part.byte_strides[0] != sizeof(float)) return nullptr;
+        return reinterpret_cast<const float *>(static_cast<const uint8_t *>(payload) + part.payload_offset);
+    }
     return nullptr;
 }
 
@@ -69,6 +88,10 @@ struct skippy_mtp_depth_scope {
 
     bool chains_heads() const {
         return depth_count > 1;
+    }
+
+    bool chains_at_same_position() const {
+        return chains_heads() && llama_get_model(ctx)->arch == LLM_ARCH_INKLING;
     }
 
     llama_context * ctx;
@@ -175,8 +198,12 @@ void skippy_mtp_trim_session_state(skippy_session * session, llama_pos token_cou
 static bool skippy_mtp_shares_target_memory(
         const llama_context * mtp_ctx,
         const llama_context * target_ctx) {
-    return mtp_ctx != nullptr && target_ctx != nullptr &&
-           llama_get_ctx_other(const_cast<llama_context *>(mtp_ctx)) == target_ctx;
+    if (mtp_ctx == nullptr || target_ctx == nullptr || llama_get_ctx_other(const_cast<llama_context *>(mtp_ctx)) != target_ctx) {
+        return false;
+    }
+    // Inkling uses ctx_other only to borrow shared target weights. Its eight
+    // attention/short-conv depth caches are independent of the target cache.
+    return llama_get_model(mtp_ctx)->arch != LLM_ARCH_INKLING;
 }
 
 enum skippy_status skippy_mtp_sync_target_inputs(
@@ -200,7 +227,7 @@ enum skippy_status skippy_mtp_sync_target_inputs(
     skippy_mtp_depth_scope mtp_depth_scope(mtp_ctx);
     const bool mtp_shares_target_memory = skippy_mtp_shares_target_memory(mtp_ctx, session->ctx);
     const bool chain_heads = mtp_depth_scope.chains_heads();
-    const bool chain_at_same_position = false;
+    const bool chain_at_same_position = mtp_depth_scope.chains_at_same_position();
     // MTP consumes complete pre-norm output rows, which can be wider than
     // token embeddings (for example DeepSeek4 hyperconnections).
     const int32_t n_hidden = llama_model_n_embd_out(session->stage_model->model);
@@ -416,9 +443,55 @@ enum skippy_status skippy_mtp_sync_target_inputs(
 }
 
 int skippy_external_decode_observe(llama_context * ctx, const llama_batch & batch) {
-    (void) ctx;
-    (void) batch;
-    return 0;
+    skippy_session * session = g_skippy_external_decode_session;
+    if (session == nullptr || ctx != session->ctx || batch.n_tokens <= 0 ||
+            session->stage_model == nullptr || session->stage_model->model == nullptr) {
+        return 0;
+    }
+    skippy_mark_context_work_pending(session->stage_model);
+    if (session->stage_model->model->arch != LLM_ARCH_INKLING) {
+        return 0;
+    }
+    session->pending_activation_exports.clear();
+    if (batch.embd != nullptr) {
+        const size_t value_count = static_cast<size_t>(batch.n_tokens)*
+                static_cast<size_t>(llama_model_n_embd(session->stage_model->model));
+        skippy_pending_activation_part part;
+        std::memcpy(part.desc.identity, SKIPPY_MTP_INPUT_EMBEDDING_IDENTITY, sizeof(part.desc.identity));
+        part.desc.ggml_type = GGML_TYPE_F32;
+        part.desc.rank = 2;
+        part.desc.token_axis = 1;
+        part.desc.flags = SKIPPY_ACTIVATION_PART_OPTIONAL;
+        part.desc.dimensions[0] = llama_model_n_embd(session->stage_model->model);
+        part.desc.dimensions[1] = batch.n_tokens;
+        part.desc.byte_strides[0] = sizeof(float);
+        part.desc.byte_strides[1] = static_cast<uint64_t>(part.desc.dimensions[0])*sizeof(float);
+        part.desc.payload_bytes = value_count*sizeof(float);
+        part.payload.resize(part.desc.payload_bytes);
+        std::memcpy(part.payload.data(), batch.embd, part.payload.size());
+        session->pending_activation_exports.push_back(std::move(part));
+    }
+
+    const llama_pos token_start = batch.pos != nullptr ? batch.pos[0] : session->n_past;
+    skippy_error * error = nullptr;
+    const skippy_status status = skippy_mtp_sync_target_inputs(
+            session,
+            batch.token,
+            batch.embd,
+            static_cast<size_t>(batch.n_tokens),
+            token_start,
+            &error);
+    if (status == SKIPPY_STATUS_OK) {
+        return 0;
+    }
+
+    fprintf(stderr, "skippy: external Inkling MTP sync failed: %s\n",
+            error != nullptr && error->message != nullptr ? error->message : "unknown error");
+    skippy_error_free(error);
+    // The target decode has already committed. Degrade only the MTP sidecar
+    // until a later target decode can re-prime it.
+    skippy_mtp_clear_session_state(session);
+    return -1;
 }
 
 skippy_graph_build_inputs skippy_external_decode_build_inputs(llama_context * ctx) {
@@ -469,7 +542,7 @@ enum skippy_status skippy_mtp_propose_next(
             max_draft_tokens,
             SKIPPY_NATIVE_MTP_MAX_DRAFT_TOKENS);
     const bool chain_heads = mtp_depth_scope.chains_heads();
-    const bool chain_at_same_position = false;
+    const bool chain_at_same_position = mtp_depth_scope.chains_at_same_position();
     if (chain_heads) {
         draft_limit = std::min<size_t>(draft_limit, mtp_depth_scope.depth_count);
     }

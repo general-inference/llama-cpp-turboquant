@@ -217,7 +217,7 @@ uint32_t llama_hparams::n_embd_k_idx(uint32_t il) const {
 
 uint32_t llama_hparams::n_embd_r() const {
     if (n_embd_r_impl != 0) {
-        // Explicit override for architectures with packed recurrent state.
+        // explicit override (e.g. inkling: 4 packed shortconv streams per layer)
         return n_embd_r_impl;
     }
 

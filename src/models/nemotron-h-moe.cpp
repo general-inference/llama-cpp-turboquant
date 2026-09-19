@@ -23,7 +23,7 @@ llama_model_nemotron_h_moe::graph_mtp::graph_mtp(const llama_model & model, cons
 
     // token embedding weights
     // A standalone NextN-only draft omits token_embd/output and shares the
-    // trunk tensors through ctx_other.
+    // trunk tensors through ctx_other (same borrowing scheme as inkling).
     const llama_model * trunk = cparams.ctx_other != nullptr ? llama_get_model(cparams.ctx_other) : nullptr;
     ggml_tensor * tok_embd_w = layer.nextn.embed_tokens ? layer.nextn.embed_tokens
                           : (model.tok_embd          ? model.tok_embd

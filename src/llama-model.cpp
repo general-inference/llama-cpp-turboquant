@@ -355,6 +355,8 @@ static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params
             return new llama_model_spark2_5(params);
         case LLM_ARCH_K2_HORIZON:
             return new llama_model_k2_horizon(params);
+        case LLM_ARCH_INKLING:
+            return new llama_model_inkling(params);
         default:
             throw std::runtime_error(std::string("unsupported model architecture: '") + llm_arch_name(arch) + "'");
     }
@@ -3215,8 +3217,19 @@ llama_memory_i * llama_model::create_memory(
                     llama_memory_hybrid::layer_filter_cb filter_idx  = nullptr;
                     const bool needs_mem_idx = (arch == LLM_ARCH_QWEN4EXP);
                     if (arch == LLM_ARCH_FALCON_H1) {
+                        // all layers have both an attention KV cache and a recurrent (conv) state
                         filter_attn = [&](uint32_t) { return true; };
                         filter_recr = [&](uint32_t) { return true; };
+                    } else if (arch == LLM_ARCH_INKLING) {
+                        // Inkling's MTP depths are appended to the trunk and each
+                        // owns both attention KV and packed short-conv state.
+                        if (params.ctx_type == LLAMA_CONTEXT_TYPE_MTP && hparams.n_layer_nextn > 0) {
+                            filter_attn = [&](uint32_t il) { return il >= hparams.n_layer(); };
+                            filter_recr = [&](uint32_t il) { return il >= hparams.n_layer(); };
+                        } else {
+                            filter_attn = [&](uint32_t il) { return il < hparams.n_layer(); };
+                            filter_recr = [&](uint32_t il) { return il < hparams.n_layer(); };
+                        }
                     } else if (arch == LLM_ARCH_NEMOTRON_H || arch == LLM_ARCH_NEMOTRON_H_MOE) {
                         filter_attn = [&](uint32_t il) {
                             return !hparams.is_recr(il) && hparams.n_ff(il) == 0;
@@ -3600,6 +3613,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_KIMI_LINEAR:
         case LLM_ARCH_KIMI_K3:
         case LLM_ARCH_GLM5_NEXT:
+        case LLM_ARCH_INKLING:
             return LLAMA_ROPE_TYPE_NONE;
 
         // use what we call a normal RoPE, operating on pairs of consecutive head values

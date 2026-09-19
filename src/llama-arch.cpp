@@ -164,6 +164,7 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
     { LLM_ARCH_QWEN3TTS,         "qwen3tts"         },
     { LLM_ARCH_POCKETTTS,        "pockettts"        },
     { LLM_ARCH_K2_HORIZON,       "k2-horizon"       },
+    { LLM_ARCH_INKLING,          "inkling"          },
     { LLM_ARCH_UNKNOWN,          "(unknown)"        },
 };
 
@@ -402,6 +403,18 @@ static const std::map<llm_kv, const char *> LLM_KV_NAMES = {
     { LLM_KV_LILICORR_MLP_HIDDEN_SIZE,   "lilicorr.mlp_hidden_size"  },
 
     { LLM_KV_SHORTCONV_L_CACHE, "%s.shortconv.l_cache" },
+
+    // inkling (private arch)
+    { LLM_KV_INKLING_D_REL,               "%s.d_rel"               },
+    { LLM_KV_INKLING_REL_EXTENT,          "%s.rel_extent"          },
+    { LLM_KV_INKLING_REL_EXTENT_SWA,      "%s.rel_extent_swa"      },
+    { LLM_KV_INKLING_SHORTCONV_KERNEL,    "%s.shortconv_kernel"    },
+    { LLM_KV_INKLING_DENSE_BLOCK_COUNT,   "%s.dense_block_count"   },
+    { LLM_KV_INKLING_LOGIT_SCALE_DENOM,   "%s.logit_scale_denom"   },
+    { LLM_KV_INKLING_LOG_SCALING_N_FLOOR, "%s.log_scaling_n_floor" },
+    { LLM_KV_INKLING_LOG_SCALING_ALPHA,   "%s.log_scaling_alpha"   },
+    { LLM_KV_INKLING_UNPADDED_VOCAB_SIZE, "%s.unpadded_vocab_size" },
+
     // sentence-transformers dense modules feature dims
     { LLM_KV_DENSE_2_FEAT_IN,        "%s.dense_2_feat_in"  },
     { LLM_KV_DENSE_2_FEAT_OUT,       "%s.dense_2_feat_out" },
@@ -1234,6 +1247,7 @@ bool llm_arch_is_hybrid(const llm_arch & arch) {
         case LLM_ARCH_QWEN4EXP:
         case LLM_ARCH_DEEPSEEK4:
         case LLM_ARCH_MINIMAX_01:
+        case LLM_ARCH_INKLING:
             return true;
         default:
             return false;
@@ -1318,6 +1332,7 @@ bool llm_arch_supports_sm_tensor(const llm_arch & arch) {
         case LLM_ARCH_KIMI_K3:
         case LLM_ARCH_GLM5_NEXT:
         case LLM_ARCH_QWEN3TTS:
+        case LLM_ARCH_INKLING:
             return false;
         default:
             return true;

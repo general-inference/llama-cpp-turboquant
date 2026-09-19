@@ -272,6 +272,12 @@ llama_context::llama_context(
         }
     }
 
+    if (model.arch == LLM_ARCH_INKLING &&
+            params.ctx_type == LLAMA_CONTEXT_TYPE_MTP &&
+            params.ctx_other != nullptr) {
+        cparams.ctx_other = params.ctx_other;
+    }
+
     // A NextN-only nemotron-h-moe MTP draft omits token_embd/output and borrows
     // the trunk tensors through ctx_other (see graph_mtp in nemotron-h-moe.cpp).
     // Without this clause the constructor silently drops params.ctx_other and

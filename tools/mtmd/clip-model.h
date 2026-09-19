@@ -556,6 +556,12 @@ struct clip_code2wav {
     ggml_tensor * dac_post_snake_beta  = nullptr;
     ggml_tensor * dac_post_conv_w      = nullptr;
     ggml_tensor * dac_post_conv_b      = nullptr;
+
+};
+
+struct inkling_hmlp_layer {
+    ggml_tensor * linear_w = nullptr;
+    ggml_tensor * norm_w   = nullptr;
 };
 
 struct clip_model {
@@ -571,6 +577,12 @@ struct clip_model {
     ggml_tensor * position_embeddings = nullptr;
     ggml_tensor * norm_embd_w = nullptr;
     ggml_tensor * norm_embd_b = nullptr;
+
+    // Inkling towers (neither uses standard transformer blocks).
+    std::vector<inkling_hmlp_layer> inkling_hmlp_layers;
+    ggml_tensor * inkling_hmlp_final_norm_w = nullptr;
+    ggml_tensor * inkling_dmel_embd_w        = nullptr;
+    ggml_tensor * inkling_dmel_final_norm_w  = nullptr;
 
     // "indexed" patch embedding norms
     ggml_tensor * patch_norm_1_w = nullptr;
