@@ -46,6 +46,7 @@ uint64_t skippy_abi_features(void) {
            SKIPPY_FEATURE_DIAGNOSTIC_EVENTS |
            SKIPPY_FEATURE_UNLOAD_EVENTS |
            SKIPPY_FEATURE_NON_CHAT_WORKLOADS |
+           SKIPPY_FEATURE_SYSTEM_ONE |
            SKIPPY_FEATURE_CACHEGEN_KV_PAGE;
 }
 

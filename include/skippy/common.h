@@ -46,7 +46,7 @@ extern "C" {
 
 #define SKIPPY_ABI_VERSION_MAJOR 0
 #define SKIPPY_ABI_VERSION_MINOR 1
-#define SKIPPY_ABI_VERSION_PATCH 67
+#define SKIPPY_ABI_VERSION_PATCH 68
 
 #if defined(_MSC_VER)
 #define SKIPPY_DEPRECATED(message) __declspec(deprecated(message))
@@ -105,6 +105,7 @@ enum skippy_feature {
 #define SKIPPY_FEATURE_UNLOAD_EVENTS          ((uint64_t)1 << 36)
 /** @brief Full-model embedding, reranking, and encoder-decoder execution. */
 #define SKIPPY_FEATURE_NON_CHAT_WORKLOADS     ((uint64_t)1 << 37)
+#define SKIPPY_FEATURE_SYSTEM_ONE             ((uint64_t)1 << 38)
 
 #define SKIPPY_FEATURE_CACHEGEN_KV_PAGE       (UINT64_C(1) << 39)
 

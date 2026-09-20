@@ -25,5 +25,6 @@
 #include "skippy/model_package.h"
 #include "skippy/signals.h"
 #include "skippy/workloads.h"
+#include "skippy/system_one.h"
 
 #endif // SKIPPY_H

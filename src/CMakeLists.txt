@@ -80,6 +80,7 @@ add_library(llama
             skippy/speculative_decoding.cpp
             skippy/tokenization.cpp
             skippy/events.cpp
+            skippy/system_one.cpp
             unicode.h
             ${LLAMA_MODELS_SOURCES}
             )
