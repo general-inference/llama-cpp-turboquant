@@ -287,6 +287,7 @@ llama_model_kimi_k3::graph::graph(const llama_model & model, const llm_graph_par
         bool banked = false;
         if (use_attn_res && (uint32_t) il % res_bs == 0) {
             res_push(prefix_sum, n_embd, n_tokens);  // banks the RAW layer input, not `cur`
+            cb(resi_stack, "resi_stack", il);
             banked = true;
         }
 
