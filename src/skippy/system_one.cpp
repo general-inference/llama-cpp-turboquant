@@ -55,6 +55,27 @@ public:
 
 } // namespace
 
+extern "C" enum skippy_status skippy_system_one_canvas_length(
+        struct skippy_model * model,
+        size_t * out_canvas_token_count,
+        struct skippy_error ** out_error) {
+    if (model == nullptr || model->model == nullptr || out_canvas_token_count == nullptr) {
+        return system_one_fail(out_error, SKIPPY_STATUS_INVALID_ARGUMENT,
+                "model and out_canvas_token_count are required");
+    }
+    if (model->model->arch != LLM_ARCH_DIFFUSION_GEMMA) {
+        return system_one_fail(out_error, SKIPPY_STATUS_UNSUPPORTED,
+                "system-one reads require a DiffusionGemma model");
+    }
+    auto * diffusion_model = dynamic_cast<llama_model_diffusion_gemma *>(model->model);
+    if (diffusion_model == nullptr || diffusion_model->canvas_length <= 0) {
+        return system_one_fail(out_error, SKIPPY_STATUS_MODEL_ERROR,
+                "DiffusionGemma model has no valid canvas length");
+    }
+    *out_canvas_token_count = static_cast<size_t>(diffusion_model->canvas_length);
+    return SKIPPY_STATUS_OK;
+}
+
 extern "C" enum skippy_status skippy_system_one_read(
         struct skippy_model * model,
         const llama_token * prompt_tokens,

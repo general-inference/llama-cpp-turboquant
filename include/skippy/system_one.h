@@ -28,6 +28,17 @@ struct skippy_system_one_slot {
 };
 
 /**
+ * @brief Returns the fixed answer-canvas length encoded by a DiffusionGemma model.
+ *
+ * Callers use this value to size and pad the canvas supplied to
+ * `skippy_system_one_read`.
+ */
+LLAMA_API enum skippy_status skippy_system_one_canvas_length(
+        struct skippy_model * model,
+        size_t * out_canvas_token_count,
+        struct skippy_error ** out_error);
+
+/**
  * @brief Scores structured labels with one DiffusionGemma read.
  *
  * Runs a single zero-self-conditioning DiffusionGemma read and returns a
