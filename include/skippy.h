@@ -26,5 +26,6 @@
 #include "skippy/signals.h"
 #include "skippy/workloads.h"
 #include "skippy/system_one.h"
+#include "skippy/laya.h"
 
 #endif // SKIPPY_H

@@ -46,7 +46,7 @@ extern "C" {
 
 #define SKIPPY_ABI_VERSION_MAJOR 0
 #define SKIPPY_ABI_VERSION_MINOR 1
-#define SKIPPY_ABI_VERSION_PATCH 68
+#define SKIPPY_ABI_VERSION_PATCH 70
 
 #if defined(_MSC_VER)
 #define SKIPPY_DEPRECATED(message) __declspec(deprecated(message))
@@ -108,6 +108,8 @@ enum skippy_feature {
 #define SKIPPY_FEATURE_SYSTEM_ONE             ((uint64_t)1 << 38)
 
 #define SKIPPY_FEATURE_CACHEGEN_KV_PAGE       (UINT64_C(1) << 39)
+/** @brief Full-model Laya decision reads (`skippy/laya.h`). */
+#define SKIPPY_FEATURE_LAYA_DECISIONS         (UINT64_C(1) << 40)
 
 enum skippy_status {
     SKIPPY_STATUS_OK                      = 0,

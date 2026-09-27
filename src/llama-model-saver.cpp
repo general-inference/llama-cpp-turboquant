@@ -23,6 +23,7 @@ bool llama_model_saver_supports_arch(llm_arch arch) {
         case LLM_ARCH_CLEF: // the head tensors are not saved
         case LLM_ARCH_VLLM_DECISION2:
         case LLM_ARCH_INKLING:
+        case LLM_ARCH_LAYA: // decision head tensors are not in the reused ModernBERT saver
         case LLM_ARCH_DIFFUSION_GEMMA: // same: a per-layer SWA pattern add_kv_from_model cannot write back
             return false;
         default:

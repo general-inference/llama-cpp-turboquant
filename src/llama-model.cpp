@@ -359,6 +359,11 @@ static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params
             return new llama_model_k2_horizon(params);
         case LLM_ARCH_INKLING:
             return new llama_model_inkling(params);
+        case LLM_ARCH_LAYA:
+            // the laya encoder is a ModernBERT (mmBERT) encoder; reuse the
+            // modern-bert model class so that llama-quantize can instantiate
+            // the arch for M2 quantization (full inference graph lands in M3)
+            return new llama_model_modern_bert(params);
         default:
             throw std::runtime_error(std::string("unsupported model architecture: '") + llm_arch_name(arch) + "'");
     }
@@ -2893,6 +2898,7 @@ llama_memory_i * llama_model::create_memory(
         case LLM_ARCH_EUROBERT:
         case LLM_ARCH_WAVTOKENIZER_DEC:
         case LLM_ARCH_MODERN_BERT:
+        case LLM_ARCH_LAYA:
         case LLM_ARCH_GEMMA_EMBEDDING:
         case LLM_ARCH_GEMMA_EMBEDDING2:
         case LLM_ARCH_DREAM:
@@ -3679,6 +3685,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_BERT:
         case LLM_ARCH_JINA_BERT_V3:
         case LLM_ARCH_MODERN_BERT:
+        case LLM_ARCH_LAYA:
         case LLM_ARCH_NOMIC_BERT:
         case LLM_ARCH_NOMIC_BERT_MOE:
         case LLM_ARCH_EUROBERT:

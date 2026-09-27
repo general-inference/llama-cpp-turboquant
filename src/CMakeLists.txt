@@ -81,6 +81,8 @@ add_library(llama
             skippy/tokenization.cpp
             skippy/events.cpp
             skippy/system_one.cpp
+            skippy/laya.cpp
+            ../tools/laya/laya.cpp
             unicode.h
             ${LLAMA_MODELS_SOURCES}
             )
@@ -105,7 +107,7 @@ set_source_files_properties(${LLAMA_MODELS_SOURCES}
 
 configure_file(llama-version.h.in ${CMAKE_CURRENT_BINARY_DIR}/llama-version.h @ONLY)
 
-target_include_directories(llama PRIVATE . ../common ${CMAKE_CURRENT_BINARY_DIR})
+target_include_directories(llama PRIVATE . ../common ../tools/laya ${CMAKE_CURRENT_BINARY_DIR})
 target_include_directories(llama PUBLIC ../include)
 target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
 # Upstream added a models.h PCH for the llama target. The Skippy stage
