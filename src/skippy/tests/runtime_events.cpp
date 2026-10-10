@@ -428,8 +428,18 @@ int test_native_model_load_production(const char * fixture_path) {
     CHECK(!session->sampling_backend_enabled);
     CHECK(session->sampling_backend_retired);
 
+    // A session that verified a window keeps sampling on the CPU: attaching a
+    // rebuilt chain would only be undone by the next window, re-reserving the
+    // scheduler both times. A reset lets the next request offload again.
+    const uint64_t reserves_after_verify = session->ctx->get_sched_reserve_count();
     CHECK(skippy_session_configure_chat_sampling(
             session, &sampling, "{\"grammar\":\"\"}", 2,
+            &error) == SKIPPY_STATUS_OK);
+    CHECK(!session->sampling_backend_enabled);
+    CHECK(session->ctx->get_sched_reserve_count() == reserves_after_verify);
+    CHECK(skippy_session_reset(session, &error) == SKIPPY_STATUS_OK);
+    CHECK(skippy_session_configure_chat_sampling(
+            session, &sampling, "{\"grammar\":\"\"}", 0,
             &error) == SKIPPY_STATUS_OK);
     CHECK(session->sampling_backend_enabled);
 

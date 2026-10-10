@@ -143,6 +143,7 @@ enum skippy_status skippy_verify_token_batch(
         session->sampling_backend_enabled = false;
         session->sampling_backend_retired = true;
     }
+    session->sampling_backend_verifying = true;
 
     const int32_t n_tokens = static_cast<int32_t>(token_count);
     llama_batch batch = llama_batch_init(n_tokens, 0, 1);
@@ -793,7 +794,8 @@ static bool skippy_ensure_plain_sampling_chain(
 void skippy_refresh_backend_sampling(
         skippy_session * session,
         const skippy_sampling_config * sampling) {
-    if (session == nullptr || session->sampling_backend_enabled || session->sampling_backend_retired) {
+    if (session == nullptr || session->sampling_backend_enabled || session->sampling_backend_retired ||
+            session->sampling_backend_verifying) {
         // Backend initialization belongs to the sampler-chain lifetime. The
         // scheduler may reset and reuse the same chain on every iteration;
         // attaching it again violates llama_sampler_chain's one-shot init

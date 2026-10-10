@@ -151,6 +151,7 @@ enum skippy_status skippy_verify_tokens_frame_sampled(
         // offload again.
         session->sampling_backend_retired = true;
     }
+    session->sampling_backend_verifying = true;
 
     const bool activation_input = skippy_is_filtered(session) && session->stage_model->config.layer_start > 0;
     status = skippy_checkpoint_verify_window(

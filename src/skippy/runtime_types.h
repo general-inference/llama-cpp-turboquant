@@ -153,6 +153,11 @@ struct skippy_session {
     // detached -- e.g. so a sampled verify window can output every row --
     // it must never be re-attached; only building a fresh chain clears this.
     bool sampling_backend_retired = false;
+    // Set when the session first verifies a speculative window and kept until the
+    // session resets: later chains sample on the CPU rather than attach to the
+    // backend only for the next window to detach them. Every attach and detach
+    // re-reserves the scheduler, and a rejected window rebuilds the chain.
+    bool sampling_backend_verifying = false;
     uint64_t sampling_reuse_hit_count = 0;
     uint64_t sampling_rebuild_count = 0;
     skippy_sampling_config sampling_config = {};

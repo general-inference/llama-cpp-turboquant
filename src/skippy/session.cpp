@@ -411,6 +411,7 @@ enum skippy_status skippy_session_reset(
         skippy_clear_chat_sampling(session);
     }
     skippy_mtp_clear_session_state(session);
+    session->sampling_backend_verifying = false;
     session->reset_required = false;
     session->verify_checkpoints.clear();
     skippy_emit_kv_event(
