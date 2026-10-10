@@ -39,6 +39,7 @@ void skippy_mark_context_synchronized(skippy_model * model);
 void skippy_synchronize_context_if_pending(skippy_model * model);
 bool skippy_memory_needs_verify_checkpoint(llama_memory_t memory);
 void skippy_mtp_clear_session_state(skippy_session * session);
+void skippy_mtp_trim_session_state(skippy_session * session, llama_pos token_count);
 void skippy_clear_chat_sampling(skippy_session * session);
 bool skippy_verify_window_can_roll_back_in_place(
         const skippy_session * session,

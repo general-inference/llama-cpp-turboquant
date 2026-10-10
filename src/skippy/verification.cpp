@@ -244,13 +244,24 @@ enum skippy_status skippy_verify_tokens_frame_sampled(
                 break;
             }
         }
-        if (out_mtp_draft != nullptr && token_count > 0 && !proposal_mismatched) {
-            status = skippy_mtp_propose_next(
-                    session,
-                    output_tokens[token_count - 1],
-                    max_draft_tokens,
-                    out_mtp_draft,
-                    out_error);
+        // Draft from the last row whose input was confirmed: the first row
+        // that rejected the proposal (its prediction is the correction the
+        // caller commits next), or the final row when every proposal held.
+        size_t anchor_row = *out_token_count - 1;
+        for (size_t i = 0; !proposal_mismatched && i + 1 < token_count; ++i) {
+            if (output_tokens[i] != token_ids[i + 1]) {
+                anchor_row = i;
+                break;
+            }
+        }
+        if (out_mtp_draft != nullptr && token_count > 0) {
+            const llama_pos token_start = session->n_past - static_cast<llama_pos>(token_count);
+            status = anchor_row + 1 == token_count
+                    ? skippy_mtp_propose_next(
+                              session, output_tokens[anchor_row], max_draft_tokens, out_mtp_draft, out_error)
+                    : skippy_mtp_propose_after_row(
+                              session, token_start, anchor_row, output_tokens[anchor_row],
+                              max_draft_tokens, out_mtp_draft, out_error);
             if (status != SKIPPY_STATUS_OK) {
                 return status;
             }

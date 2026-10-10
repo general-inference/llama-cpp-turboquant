@@ -30,3 +30,15 @@ enum skippy_status skippy_mtp_propose_next(
         size_t max_draft_tokens,
         skippy_native_mtp_draft * out_mtp_draft,
         skippy_error ** out_error);
+// Proposes after row `anchor_row` of the batch just verified at `token_start`,
+// continuing from that row's predicted (correction) token. Rows past the
+// anchor were conditioned on a rejected proposal; their sidecar rows are
+// dropped first.
+enum skippy_status skippy_mtp_propose_after_row(
+        skippy_session * session,
+        llama_pos token_start,
+        size_t anchor_row,
+        llama_token predicted_token,
+        size_t max_draft_tokens,
+        skippy_native_mtp_draft * out_mtp_draft,
+        skippy_error ** out_error);

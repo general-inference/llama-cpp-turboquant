@@ -172,6 +172,11 @@ struct skippy_session {
     // is the boundary the next sync prunes back to once the accepted prefix is
     // known.
     llama_pos mtp_pending_draft_end = 0;
+    // Trunk hidden rows from the tail of the last synced batch, starting at
+    // mtp_recent_h_start. A trim back into that batch restores the MTP seed
+    // from here instead of discarding the sidecar's whole prefix.
+    std::vector<float> mtp_recent_h;
+    llama_pos mtp_recent_h_start = 0;
     std::vector<skippy_pending_activation_part> pending_activation_exports;
     bool reset_required = false;
     std::vector<skippy_verify_checkpoint> verify_checkpoints;

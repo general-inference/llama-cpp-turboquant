@@ -848,7 +848,7 @@ enum skippy_status skippy_trim_session(
     if (session->signal_history.size() > token_count) {
         session->signal_history.resize(static_cast<size_t>(token_count));
     }
-    skippy_mtp_clear_session_state(session);
+    skippy_mtp_trim_session_state(session, static_cast<llama_pos>(token_count));
     session->verify_checkpoints.clear();
     session->ctx->synchronize();
 
