@@ -259,12 +259,110 @@ class Qwen3Model(Qwen2Model):
 @ModelBase.register("Qwen3MoeForCausalLM")
 @ModelBase.example("Qwen/Qwen3-30B-A3B")
 class Qwen3MoeModel(Qwen2MoeModel):
+    """Qwen3-MoE, optionally with an appended native MTP head.
+
+    The head is a separately trained module stored beside the checkpoint as
+    `mtp.safetensors` + `mtp_config.json` (keys `hnorm`, `enorm`, `proj`,
+    `layer.*` as an HF Qwen3DecoderLayer with a dense MLP, and `norm`). It is
+    emitted as NextN block `num_hidden_layers`: z = proj([hnorm(h); enorm(e)]),
+    so `proj`'s two input halves are swapped into the GGUF `eh_proj` order,
+    which concatenates [enorm(e); hnorm(h)]."""
+
     model_arch = gguf.MODEL_ARCH.QWEN3MOE
+    supports_mtp_export = True
+
+    MTP_HEAD_WEIGHTS = "mtp.safetensors"
+    MTP_HEAD_CONFIG = "mtp_config.json"
+    MTP_HEAD_RENAMES = {
+        "hnorm.weight": "hnorm.weight",
+        "enorm.weight": "enorm.weight",
+        "proj.weight":  "eh_proj.weight",
+        "norm.weight":  "shared_head.norm.weight",
+    }
+    _has_mtp_head = False
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         hparams = ModelBase.load_hparams(self.dir_model, False)
         self.origin_hf_arch = hparams.get('architectures', [None])[0]
+        self._n_main_layers = self.hparams["num_hidden_layers"]
+        if self._has_mtp_head:
+            self.block_count = self._n_main_layers + 1
+            self.tensor_map = gguf.get_tensor_name_map(self.model_arch, self.block_count)
+        elif self.mtp_only:
+            raise ValueError(f"--mtp needs {self.MTP_HEAD_WEIGHTS} and {self.MTP_HEAD_CONFIG} in {self.dir_model}")
+
+    @classmethod
+    def filter_tensors(cls, item):
+        if (titem := super().filter_tensors(item)) is None:
+            return None
+        if cls.mtp_only and titem[0] not in ("model.embed_tokens.weight", "model.norm.weight", "lm_head.weight"):
+            return None
+        return titem
+
+    def index_tensors(self, remote_hf_model_id: str | None = None) -> dict[str, Callable[[], Tensor]]:
+        tensors = super().index_tensors(remote_hf_model_id=remote_hf_model_id)
+        head_path = self.dir_model / self.MTP_HEAD_WEIGHTS
+        self._has_mtp_head = not self.no_mtp and remote_hf_model_id is None and head_path.is_file()
+        if not self._has_mtp_head:
+            return tensors
+        self._check_mtp_head_config()
+        il = self.hparams["num_hidden_layers"]
+        with gguf.utility.SafetensorsLocal(head_path) as head:
+            for key in head.keys():
+                if key in self.MTP_HEAD_RENAMES:
+                    name = f"model.layers.{il}.{self.MTP_HEAD_RENAMES[key]}"
+                elif key.startswith("layer."):
+                    name = f"model.layers.{il}.{key.removeprefix('layer.')}"
+                else:
+                    raise ValueError(f"unexpected tensor {key!r} in {head_path}")
+                data = head[key]
+                if self.lazy:
+                    tensors[name] = lambda data=data: LazyTorchTensor.from_local_tensor(data)
+                else:
+                    dtype = LazyTorchTensor._dtype_str_map[data.dtype]
+                    tensors[name] = lambda data=data, dtype=dtype: torch.from_numpy(data.mmap_bytes()).view(dtype).reshape(data.shape)
+        logger.info(f"gguf: appending MTP head from {head_path} as NextN block {il}")
+        return tensors
+
+    def _check_mtp_head_config(self):
+        with open(self.dir_model / self.MTP_HEAD_CONFIG, encoding="utf-8") as f:
+            head = json.load(f)
+        trunk_head_dim = self.hparams.get("head_dim", self.hparams["hidden_size"] // self.hparams["num_attention_heads"])
+        for key, want in (("hidden_size", self.hparams["hidden_size"]),
+                          ("num_attention_heads", self.hparams["num_attention_heads"]),
+                          ("num_key_value_heads", self.hparams["num_key_value_heads"]),
+                          ("head_dim", trunk_head_dim),
+                          ("rope_theta", self.hparams.get("rope_theta")),
+                          ("rms_norm_eps", self.hparams["rms_norm_eps"]),
+                          ("vocab_size", self.hparams["vocab_size"])):
+            got = head.get(key, want)
+            if got != want:
+                raise ValueError(f"MTP head {key}={got!r} does not match the trunk's {want!r}")
+        if head.get("attention_bias", False):
+            raise ValueError("MTP head attention bias is not supported for qwen3moe")
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+        if self._has_mtp_head:
+            self.gguf_writer.add_nextn_predict_layers(self.block_count - self._n_main_layers)
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        if self._has_mtp_head and bid == self._n_main_layers and name.endswith(".eh_proj.weight"):
+            d = data_torch.shape[1] // 2
+            data_torch = torch.cat((data_torch[:, d:], data_torch[:, :d]), dim=1)
+        yield from super().modify_tensors(data_torch, name, bid)
+
+    def prepare_metadata(self, vocab_only: bool):
+        from_dir = self.fname_out.is_dir()
+        super().prepare_metadata(vocab_only=vocab_only)
+        if not self.mtp_only or not from_dir:
+            return
+        output_type: str = self.ftype.name.partition("_")[2]  # ty: ignore[unresolved-attribute]
+        fname_default: str = gguf.naming_convention(
+            self.metadata.name, self.metadata.basename, self.metadata.finetune,                  # ty: ignore[unresolved-attribute]
+            self.metadata.version, size_label=None, output_type=output_type, model_type=None)    # ty: ignore[unresolved-attribute]
+        self.fname_out = self.fname_out.parent / f"mtp-{fname_default}.gguf"
 
     def set_vocab(self):
         # deal with intern-s1

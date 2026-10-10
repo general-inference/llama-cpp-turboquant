@@ -1486,7 +1486,7 @@ int main(int argc, char ** argv) {
             if (dense_mtp_depth == 0) throw std::runtime_error("--dense-mtp-depth must be positive");
             auto gguf = get_gguf_ctx(arch,
                     arch == LLM_ARCH_STEP35 || arch == LLM_ARCH_MIMO2 || arch == LLM_ARCH_HY_V3 ||
-                            arch == LLM_ARCH_GLM_DSA,
+                            arch == LLM_ARCH_GLM_DSA || arch == LLM_ARCH_QWEN3MOE,
                     glm_dsa_indexshare_fixture::DEFAULT,
                     256, 8, false, 2 + dense_mtp_depth, 256);
             llama_model_saver metadata(arch, gguf.get());

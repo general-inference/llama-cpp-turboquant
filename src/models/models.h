@@ -649,6 +649,11 @@ struct llama_model_qwen3moe : public llama_model_base {
         graph(const llama_model & model, const llm_graph_params & params);
     };
 
+    // Appended NextN block: one Qwen3 decoder layer with a dense SwiGLU FFN.
+    struct graph_mtp : public llm_graph_context {
+        graph_mtp(const llama_model & model, const llm_graph_params & params);
+    };
+
     std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const override;
 };
 

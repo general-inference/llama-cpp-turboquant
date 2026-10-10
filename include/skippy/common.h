@@ -46,7 +46,7 @@ extern "C" {
 
 #define SKIPPY_ABI_VERSION_MAJOR 0
 #define SKIPPY_ABI_VERSION_MINOR 1
-#define SKIPPY_ABI_VERSION_PATCH 70
+#define SKIPPY_ABI_VERSION_PATCH 71
 
 #if defined(_MSC_VER)
 #define SKIPPY_DEPRECATED(message) __declspec(deprecated(message))

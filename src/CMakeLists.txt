@@ -200,6 +200,14 @@ if (LLAMA_STAGE_BUILD_TESTS)
     add_test(NAME skippy_glm_dsa_mtp COMMAND skippy-profile-residency
         "${GLM_DSA_MTP_FIXTURE_DIR}/dense-mtp.gguf")
     set_tests_properties(skippy_glm_dsa_mtp PROPERTIES FIXTURES_REQUIRED glm-dsa-mtp-model)
+    set(QWEN3MOE_MTP_FIXTURE_DIR "${CMAKE_CURRENT_BINARY_DIR}/qwen3moe-mtp-models")
+    file(MAKE_DIRECTORY "${QWEN3MOE_MTP_FIXTURE_DIR}")
+    add_test(NAME skippy_generate_qwen3moe_mtp COMMAND skippy-model-fixture-generator
+        --arch qwen3moe --seed 42 --dense-mtp --out "${QWEN3MOE_MTP_FIXTURE_DIR}")
+    set_tests_properties(skippy_generate_qwen3moe_mtp PROPERTIES FIXTURES_SETUP qwen3moe-mtp-model)
+    add_test(NAME skippy_qwen3moe_mtp COMMAND skippy-profile-residency
+        "${QWEN3MOE_MTP_FIXTURE_DIR}/dense-mtp.gguf")
+    set_tests_properties(skippy_qwen3moe_mtp PROPERTIES FIXTURES_REQUIRED qwen3moe-mtp-model)
     set(MULTIDEPTH_MTP_FIXTURE_DIR "${CMAKE_CURRENT_BINARY_DIR}/multidepth-mtp-models")
     file(MAKE_DIRECTORY "${MULTIDEPTH_MTP_FIXTURE_DIR}")
     add_test(NAME skippy_generate_multidepth_mtp COMMAND skippy-model-fixture-generator
