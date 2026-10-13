@@ -436,6 +436,21 @@ static common_chat_tool special_function_tool{
         "required": ["arg1"]
     })",
 };
+static common_chat_tool lookup_fixture_fact_tool{
+    /* .name = */ "lookup_fixture_fact",
+    /* .description = */ "Return one deterministic fact from the agent reliability fixture.",
+    /* .parameters = */ R"({
+        "type": "object",
+        "properties": {
+            "key": {
+                "type": "string",
+                "enum": ["codeword"]
+            }
+        },
+        "required": ["key"],
+        "additionalProperties": false
+    })",
+};
 static common_chat_tool special_function_tool_with_optional_param{
     /* .name = */ "special_function_with_opt",
     /* .description = */ "I'm special but have optional stuff",
@@ -1488,6 +1503,8 @@ class peg_tester {
 
     const std::string & template_path() const { return template_path_; }
 
+    common_chat_templates * templates() const { return tmpls_.get(); }
+
     peg_test_builder test(const std::string & input);
 };
 
@@ -1667,20 +1684,34 @@ static void test_msgs_oaicompat_json_conversion() {
                               "]"),
                   common_chat_msgs_to_json_oaicompat({ message_assist_call_python }).dump(2));
 
-    auto res = common_chat_msgs_parse_oaicompat(json::parse("[{\"role\": \"assistant\", \"tool_calls\": []}]"));
+    auto res = common_chat_msgs_parse_oaicompat(json::parse("[{\"role\": \"assistant\"}]"));
     assert_equals<size_t>(1, res.size());
     assert_equals<std::string>(res[0].role, "assistant");
     assert_equals(true, res[0].content.empty());
     assert_equals(true, res[0].tool_calls.empty());
+    assert_equals(false, res[0].content_present);
+    assert_equals(
+        std::string("[{\"role\":\"assistant\"}]"),
+        common_chat_msgs_to_json_oaicompat(res).dump());
 
-    try {
-        common_chat_msgs_parse_oaicompat(json::parse("[{\"role\": \"assistant\"}]"));
-        throw std::runtime_error("Expected exception");
-    } catch (const std::exception & e) {
-        if (std::string(e.what()).find("'content'") == std::string::npos) {
-            throw std::runtime_error("Expected exception about missing 'content'");
-        }
-    }
+    auto null_content =
+        common_chat_msgs_parse_oaicompat(json::parse("[{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[]}]"));
+    assert_equals<size_t>(1, null_content.size());
+    assert_equals(true, null_content[0].content_present);
+    assert_equals(true, null_content[0].content_is_null);
+    assert_equals(
+        std::string("[{\"role\":\"assistant\",\"content\":null}]"),
+        common_chat_msgs_to_json_oaicompat(null_content).dump());
+
+    auto empty_content =
+        common_chat_msgs_parse_oaicompat(json::parse("[{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[]}]"));
+    assert_equals<size_t>(1, empty_content.size());
+    assert_equals(true, empty_content[0].content_present);
+    assert_equals(false, empty_content[0].content_is_null);
+    assert_equals(
+        std::string("[{\"role\":\"assistant\",\"content\":\"\"}]"),
+        common_chat_msgs_to_json_oaicompat(empty_content).dump());
+
 }
 
 static void test_msg_token_delimiters_split() {
@@ -2136,6 +2167,25 @@ static void test_lfm2_parser(const std::string & template_path, bool detailed_de
         .run();
 
 }
+
+// parses raw template output with the parser the template itself produced
+struct make_peg_parser {
+    common_chat_params params_;
+    bool               detailed_debug_;
+
+    make_peg_parser(common_chat_templates *              tmpls,
+                    const common_chat_templates_inputs & inputs,
+                    bool                                 detailed_debug = false) {
+        detailed_debug_ = detailed_debug;
+        params_         = common_chat_templates_apply(tmpls, inputs);
+    }
+
+    common_chat_msg parse(const std::string & msg, bool is_partial) const {
+        common_chat_parser_params parser_params(params_);
+        parser_params.debug = detailed_debug_;
+        return common_chat_peg_parse(params_.parser, common_chat_input(msg), is_partial, parser_params);
+    }
+};
 
 static void test_template_output_peg_parsers(bool detailed_debug) {
     LOG_DBG("%s\n", __func__);
@@ -4416,6 +4466,15 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
     {
         auto tst = peg_tester("models/templates/GLM-4.7-Flash.jinja", detailed_debug);
 
+        static const common_chat_tool terminal_tool{
+            "terminal", "Run or interact with a terminal command",
+            R"({"type":"object","properties":{"security_risk":{"type":"string"},"summary":{"type":"string"},"command":{"type":"string"},"is_input":{"type":"boolean"},"timeout":{"type":"integer"},"reset":{"type":"boolean"}},"required":["command","security_risk"]})",
+        };
+        static const common_chat_tool think_tool{
+            "think", "Record reasoning",
+            R"({"type":"object","properties":{"summary":{"type":"string"},"thought":{"type":"string"}},"required":["thought"]})",
+        };
+
         // Pure content (no reasoning)
         tst.test("Hello, world!\nWhat's up?")
             .enable_thinking(false)
@@ -4441,6 +4500,70 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect(message_assist_call)
             .expect_reconstruction()
             .run();
+
+        // OpenAI tool arguments are object members: required and optional
+        // fields may be interleaved in any order. These are exact ordering
+        // shapes observed in a multi-tool agent regression case.
+        tst.test(
+               "<tool_call>terminal"
+               "<arg_key>command</arg_key><arg_value>C-c</arg_value>"
+               "<arg_key>is_input</arg_key><arg_value>true</arg_value>"
+               "<arg_key>security_risk</arg_key><arg_value>LOW</arg_value>"
+               "</tool_call>")
+            .enable_thinking(false)
+            .tools({ terminal_tool, think_tool })
+            .expect_tool_calls({
+                { "terminal", R"({"command":"C-c","is_input":true,"security_risk":"LOW"})", {} },
+            })
+            .run();
+
+        tst.test(
+               "<tool_call>think"
+               "<arg_key>summary</arg_key><arg_value>Inspect the failure</arg_value>"
+               "<arg_key>thought</arg_key><arg_value>Check the process state.</arg_value>"
+               "</tool_call>")
+            .enable_thinking(false)
+            .tools({ terminal_tool, think_tool })
+            .expect_tool_calls({
+                { "think", R"({"summary":"Inspect the failure","thought":"Check the process state."})", {} },
+            })
+            .run();
+
+        // Flexible ordering must not weaken the schema's presence and
+        // uniqueness rules. permute() requires every required argument exactly
+        // once, so the grammar itself rejects a call that omits or duplicates a
+        // required argument -- no bespoke mapper-side "missing/duplicate
+        // argument" error, matching the generic JSON tool path.
+        common_chat_templates_inputs validation_inputs;
+        validation_inputs.messages = { message_user };
+        validation_inputs.tools = { terminal_tool, think_tool };
+        validation_inputs.enable_thinking = false;
+        auto validation_parser = make_peg_parser(tst.templates(), validation_inputs, detailed_debug);
+
+        // Omitting a required argument does not match the tool grammar.
+        try {
+            validation_parser.parse(
+                "<tool_call>terminal"
+                "<arg_key>command</arg_key><arg_value>pwd</arg_value>"
+                "</tool_call>", false);
+            throw std::runtime_error("Expected missing required tagged argument to be rejected by the grammar");
+        } catch (const std::exception & e) {
+            assert_contains(e.what(), "does not match the expected");
+        }
+
+        // Duplicating a required argument does not match either: permute()
+        // consumes each required argument exactly once and the surplus copy has
+        // no slot in the grammar.
+        try {
+            validation_parser.parse(
+                "<tool_call>think"
+                "<arg_key>thought</arg_key><arg_value>one</arg_value>"
+                "<arg_key>thought</arg_key><arg_value>two</arg_value>"
+                "</tool_call>", false);
+            throw std::runtime_error("Expected duplicate required tagged argument to be rejected by the grammar");
+        } catch (const std::exception & e) {
+            assert_contains(e.what(), "does not match the expected");
+        }
 
         // Tool call with reasoning (forced-open mode)
         tst.test(
@@ -4646,7 +4769,7 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
                 "Thinking.\n"
                 "</think>"
                 "<tool_call>get_weather"
-                "<arg_key>city</arg_key><arg_value>Tokyo</arg_value>"
+                "<arg_key>country</arg_key><arg_value>Japan</arg_value>"
                 "</tool_call>\n";
 
             bool got_runtime_error = false;
@@ -7566,6 +7689,41 @@ static void test_template_generation_prompt() {
         check(tmpls, continuation_content(),   "<|im_start|>assistant\n<think>\nI'm thinking\n</think>\n\nHello, ");
         check(tmpls, continuation_reasoning(), "<|im_start|>assistant\n<think>\nI'm");
     }
+
+    {
+        // Preserve canonical "none" while keeping the boolean aliases disabled.
+        auto render_disabled = [](const char * template_path) {
+            auto tmpls = read_templates(template_path);
+            common_chat_templates_inputs inputs;
+            inputs.messages              = { message_user };
+            inputs.add_generation_prompt = true;
+            inputs.enable_thinking       = false;
+            inputs.chat_template_kwargs["enable_thinking"] = "false";
+            inputs.chat_template_kwargs["enableThinking"] = "false";
+            inputs.chat_template_kwargs["enable_reasoning"] = "false";
+            inputs.chat_template_kwargs["use_reasoning"] = "false";
+            inputs.chat_template_kwargs["reasoning_enabled"] = "false";
+            inputs.chat_template_kwargs["use_thinking"] = "false";
+            inputs.chat_template_kwargs["thinking_enabled"] = "false";
+            inputs.chat_template_kwargs["enable_think"] = "false";
+            inputs.chat_template_kwargs["think_enabled"] = "false";
+            inputs.chat_template_kwargs["reasoning_effort"] = R"("none")";
+
+            json request_kwargs = {{"reasoning_effort", "none"}};
+            for (const auto & [key, value] : request_kwargs.items()) {
+                inputs.chat_template_kwargs[key] = value.dump();
+            }
+            if (!inputs.enable_thinking) {
+                inputs.chat_template_kwargs["reasoning_effort"] = R"("none")";
+            }
+            return common_chat_templates_apply(tmpls.get(), inputs).prompt;
+        };
+
+        const auto qwen = render_disabled("models/templates/Qwen-Qwen3-0.6B.jinja").str();
+        assert_contains(qwen, "<think>\n\n</think>\n\n");
+        const auto gpt_oss = render_disabled("models/templates/openai-gpt-oss-120b.jinja").str();
+        assert_contains(gpt_oss, "Reasoning: none");
+    }
 }
 
 // Test the developer role to system workaround with a simple mock template
@@ -8053,6 +8211,7 @@ static void test_msg_diffs_compute() {
 int main(int argc, char ** argv) {
     bool detailed_debug    = false;
     bool only_run_filtered = false;
+    bool only_run_generation_prompt = false;
 
     // Check for --template and --detailed flags
     for (int i = 1; i < argc; i++) {
@@ -8070,9 +8229,19 @@ int main(int argc, char ** argv) {
             g_force_reconstruction_test = true;
             only_run_filtered          = true;
         }
+        if (arg == "--generation-prompt") {
+            only_run_generation_prompt = true;
+            only_run_filtered          = true;
+        }
     }
 
     if (only_run_filtered) {
+        if (only_run_generation_prompt) {
+            test_template_generation_prompt();
+            std::cout << "\n[chat] All generation prompt tests passed!" << '\n';
+            return 0;
+        }
+
         test_template_output_peg_parsers(detailed_debug);
         std::cout << "\n[chat] All template tests passed!" << '\n';
         return 0;

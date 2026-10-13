@@ -1,5 +1,6 @@
 #include "reasoning-budget.h"
 #include "unicode.h"
+#include "common.h"
 
 #include "llama.h"
 #include "ggml.h"

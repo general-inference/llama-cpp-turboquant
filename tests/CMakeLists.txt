@@ -178,7 +178,15 @@ set(LLAMA_CONTEXT_TEST_SRC
 )
 llama_build(${LLAMA_CONTEXT_TEST_SRC})
 
+llama_build_and_test(test-skippy-rerank-template.cpp)
+
 if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
+    llama_build_and_test(test-skippy-cachegen-import.cpp)
+    llama_build_and_test(test-skippy-sampling-suppress.cpp)
+    llama_build_and_test(test-skippy-kv-page-export.cpp)
+    llama_build_and_test(test-skippy-verify-checkpoint-retirement.cpp)
+    llama_build_and_test(test-skippy-kv-cells-contiguous.cpp)
+    llama_build_and_test(test-skippy-recurrent-state-roundtrip.cpp)
     # these tests are disabled on Windows because they use internal functions not exported with LLAMA_API (when building with shared libraries)
     llama_build_and_test(test-unicode.cpp LINK llama)
     llama_build_and_test(test-sampling.cpp LINK llama)
@@ -240,6 +248,23 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
     )
 
     # Test context state handling across all architectures, using the generated dummy models
+
+    llama_build_and_test(
+        test-skippy-model-loader-accounting.cpp
+        LABEL main
+        ARGS "${MODEL_DIR}/gemma-dense.gguf"
+    )
+    target_include_directories(test-skippy-model-loader-accounting PRIVATE ${PROJECT_SOURCE_DIR}/src)
+    set_tests_properties(test-skippy-model-loader-accounting PROPERTIES FIXTURES_REQUIRED generate-models)
+
+    llama_test(
+        test-skippy-model-loader-accounting
+        NAME test-skippy-model-loader-accounting-moe
+        LABEL main
+        ARGS "${MODEL_DIR}/qwen2moe-moe.gguf"
+    )
+    set_tests_properties(test-skippy-model-loader-accounting-moe PROPERTIES FIXTURES_REQUIRED generate-models)
+
     llama_test(
         test-llama-context
         LABEL main
@@ -252,6 +277,10 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
     )
 
     llama_build(test-fusion.cpp)
+endif()
+
+if (GGML_METAL)
+    llama_build_and_test(test-skippy-cachegen-metal.cpp)
 endif()
 
 llama_build_and_test(test-chat-peg-parser.cpp peg-parser/simple-tokenize.cpp)

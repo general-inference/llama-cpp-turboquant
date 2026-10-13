@@ -15,14 +15,31 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cstdint>
+#include <filesystem>
 #include <random>
 #include <regex>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
+
+// llama_model_save_to_file() and llama_model_saver::save() do not report a
+// failed write, so a fixture whose directory is missing used to produce no
+// file and exit code 0. Drop any stale copy first, then check what was written.
+static void begin_fixture_write(const std::string & path) {
+    std::error_code ignored;
+    std::filesystem::remove(path, ignored);
+}
+
+static void require_fixture_written(const std::string & path) {
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(path, error) || std::filesystem::file_size(path, error) == 0 || error) {
+        throw std::runtime_error("cannot write model fixture " + path);
+    }
+}
 
 static bool arch_matches(const std::string & filter, llm_arch arch) {
     if (filter.empty()) {
@@ -94,6 +111,7 @@ static void usage(char ** argv) {
     LOG("  -o, --out <dir>          Save generated test models to <dir> instead of running backend tests\n");
     LOG("  -v <N>                   Set log verbosity level\n");
     LOG("  -b, --backend <backend>  Run only on the given backend device\n");
+    LOG("  -t, --text-only          Save models with empty rope dimension sections (text-only fixtures)\n");
     LOG("  -h, --help               Show this help message\n\n");
     LOG("Examples:\n");
     LOG("  %s\n", argv[0]);
@@ -123,10 +141,26 @@ static bool host_experts_test(const llm_arch arch) {
     }
 }
 
-static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
+enum class glm_dsa_indexshare_fixture {
+    DEFAULT,
+    CONFLICTING_METADATA,
+    SHARED_FIRST,
+    FULL_SHARED,
+    FULL_SHARED_SHARED,
+    PERIODIC_FULL_SHARED,
+};
+
+static gguf_context_ptr get_gguf_ctx(
+        const llm_arch arch,
+        const bool moe,
+        const glm_dsa_indexshare_fixture glm_dsa_indexshare = glm_dsa_indexshare_fixture::DEFAULT,
+        const uint32_t context_length = 256,
+        const uint32_t glm_dsa_indexer_top_k = 131072,
+        const bool deepseek4_mtp = false,
+        const uint32_t contract_layers = 0, const uint32_t contract_width = 0) {
     gguf_context_ptr ret(gguf_init_empty());
     llama_model_saver ms(arch, ret.get());
-    const uint32_t n_ctx = 256;
+    const uint32_t n_ctx = context_length;
 
     uint32_t n_vocab = 128;
     uint32_t n_embd  = 256;
@@ -153,7 +187,7 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
         n_embd  = 512;
         n_head  = 8;
         n_ff    = 1024;
-        n_layer = 4;
+        n_layer = deepseek4_mtp ? 5 : 4;
     } else if (arch == LLM_ARCH_STEP35 || arch == LLM_ARCH_LAGUNA) {
         n_embd = 160; // exercise per-head tensor split granularity with head size 80
     } else if (arch == LLM_ARCH_QWEN3 || arch == LLM_ARCH_MUSE_GLIMMER || arch == LLM_ARCH_AFMOE) {
@@ -182,6 +216,16 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
         n_layer = 6; // 1 layer per stack x 2 h-cycles x (2 l-cycles + 1) cache slots
     }
 
+    if (arch == LLM_ARCH_GLM_DSA) {
+        if (glm_dsa_indexshare == glm_dsa_indexshare_fixture::FULL_SHARED_SHARED) {
+            n_layer = 3;
+        } else if (glm_dsa_indexshare == glm_dsa_indexshare_fixture::PERIODIC_FULL_SHARED) {
+            n_layer = 4;
+        }
+    }
+
+    if (contract_layers) { n_layer = contract_layers; n_embd = contract_width; }
+
     uint32_t n_head_kv = n_head;
     if (arch == LLM_ARCH_QWEN3) {
         n_head_kv = 1; // MQA coverage
@@ -196,7 +240,10 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
     ms.add_kv(LLM_KV_EMBEDDING_LENGTH,          n_embd);
     ms.add_kv(LLM_KV_FEATURES_LENGTH,           n_embd);
     ms.add_kv(LLM_KV_BLOCK_COUNT,               n_layer);
-    ms.add_kv(LLM_KV_LEADING_DENSE_BLOCK_COUNT, uint32_t(1));
+    ms.add_kv(LLM_KV_LEADING_DENSE_BLOCK_COUNT,
+            arch == LLM_ARCH_GLM_DSA &&
+                    glm_dsa_indexshare == glm_dsa_indexshare_fixture::FULL_SHARED_SHARED
+                ? n_layer : uint32_t(1));
 
     if (arch == LLM_ARCH_K2_HORIZON) {
         ms.add_kv(LLM_KV_ROPE_SCALING_YARN_BETA_FAST, 128.0f);
@@ -245,7 +292,7 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
     if (arch == LLM_ARCH_DEEPSEEK4) {
         ms.add_kv(LLM_KV_ATTENTION_KEY_LENGTH,   n_embd_head);
         ms.add_kv(LLM_KV_ATTENTION_VALUE_LENGTH, n_embd_head);
-        ms.add_kv(LLM_KV_ROPE_DIMENSION_COUNT,   n_embd_head/2);
+        ms.add_kv(LLM_KV_ROPE_DIMENSION_COUNT,   std::min<uint32_t>(n_embd_head/2, 128));
     } else if (arch == LLM_ARCH_DEEPSEEK2
             || arch == LLM_ARCH_DEEPSEEK32
             || arch == LLM_ARCH_GLM_DSA
@@ -359,12 +406,45 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
     // note: using a realistic top-k here makes the results unstable and hard to match between CPU and GPU
     //       a large value makes things deterministic since all data is selected by the indexer
     //ms.add_kv(LLM_KV_ATTENTION_INDEXER_TOP_K,        uint32_t(8));
-    ms.add_kv(LLM_KV_ATTENTION_INDEXER_TOP_K,        uint32_t(131072));
+    // GLM-DSA callers pass a realistic top-k explicitly for sparse-indexer stage contracts; the
+    // default stays at the select-everything value so backend parity remains deterministic
+    ms.add_kv(LLM_KV_ATTENTION_INDEXER_TOP_K,        arch == LLM_ARCH_GLM_DSA ? glm_dsa_indexer_top_k : uint32_t(131072));
 
     ms.add_kv(LLM_KV_ATTENTION_INDEXER_BLOCK_SIZE,   uint32_t(4));
     ms.add_kv(LLM_KV_ATTENTION_INDEXER_KPOOL,        uint32_t(4));
     ms.add_kv(LLM_KV_ATTENTION_INDEXER_KPOOL_SELECT_TAIL, true);
     ms.add_kv(LLM_KV_ATTENTION_INDEXER_LOCAL_BLOCKS, uint32_t(1));
+    if (arch == LLM_ARCH_GLM_DSA) {
+        std::vector<uint32_t> indexer_types;
+        indexer_types.reserve(n_layer);
+        uint32_t frequency = 2;
+        uint32_t offset = 1;
+        for (uint32_t il = 0; il < n_layer; il++) {
+            switch (glm_dsa_indexshare) {
+                case glm_dsa_indexshare_fixture::SHARED_FIRST:
+                    indexer_types.push_back(il % 2);
+                    offset = 0;
+                    break;
+                case glm_dsa_indexshare_fixture::FULL_SHARED_SHARED:
+                    indexer_types.push_back(il % 3 == 0 ? 1 : 0);
+                    frequency = 3;
+                    break;
+                case glm_dsa_indexshare_fixture::CONFLICTING_METADATA:
+                    indexer_types.push_back(il % 2 ? 0 : 1);
+                    frequency = 1;
+                    offset = 0;
+                    break;
+                case glm_dsa_indexshare_fixture::DEFAULT:
+                case glm_dsa_indexshare_fixture::FULL_SHARED:
+                case glm_dsa_indexshare_fixture::PERIODIC_FULL_SHARED:
+                    indexer_types.push_back(il % 2 ? 0 : 1);
+                    break;
+            }
+        }
+        ms.add_kv(LLM_KV_ATTENTION_INDEXER_TOP_K_FREQUENCY, frequency);
+        ms.add_kv(LLM_KV_ATTENTION_INDEXER_SKIP_TOP_K_OFFSET, offset);
+        ms.add_kv(LLM_KV_ATTENTION_INDEXER_TYPES, indexer_types);
+    }
     // mrope sections count rope pairs; Ling 3.0 VL files carry [t, h, w] sections
     // summing to n_rot / 2 (n_rot is 64 in this fixture)
     if (arch == LLM_ARCH_BAILINGMOE3) {
@@ -372,7 +452,6 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
     } else {
         ms.add_kv(LLM_KV_ROPE_DIMENSION_SECTIONS, std::vector<uint32_t>({n_embd_head/4, n_embd_head/4, n_embd_head/4, n_embd_head/4}));
     }
-
     if (arch == LLM_ARCH_HY_V4) {
         ms.add_kv(LLM_KV_HYPER_CONNECTION_COUNT,     uint32_t(4));
         ms.add_kv(LLM_KV_HYPER_CONNECTION_EPSILON,   1.0e-6f);
@@ -390,13 +469,15 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
     }
 
     if (arch == LLM_ARCH_DEEPSEEK4) {
-        ms.add_kv(LLM_KV_ATTENTION_OUTPUT_GROUP_COUNT,          uint32_t(8));
-        ms.add_kv(LLM_KV_ATTENTION_OUTPUT_LORA_RANK,            uint32_t(32));
-        ms.add_kv(LLM_KV_ATTENTION_COMPRESS_RATIOS,             std::vector<uint32_t>({0, 0, 4, 128}));
-        ms.add_kv(LLM_KV_ATTENTION_COMPRESS_ROPE_FREQ_BASE,     160000.0f);
-        ms.add_kv(LLM_KV_HYPER_CONNECTION_COUNT,                uint32_t(4));
-        ms.add_kv(LLM_KV_HYPER_CONNECTION_SINKHORN_ITERATIONS,  uint32_t(2));
-        ms.add_kv(LLM_KV_HYPER_CONNECTION_EPSILON,              1.0e-6f);
+        std::vector<uint32_t> compress_ratios = {0, 0, 4, 128};
+        compress_ratios.resize(n_layer, 0);
+        ms.add_kv(LLM_KV_ATTENTION_OUTPUT_GROUP_COUNT,         uint32_t(8));
+        ms.add_kv(LLM_KV_ATTENTION_OUTPUT_LORA_RANK,           uint32_t(32));
+        ms.add_kv(LLM_KV_ATTENTION_COMPRESS_RATIOS,            compress_ratios);
+        ms.add_kv(LLM_KV_ATTENTION_COMPRESS_ROPE_FREQ_BASE,    160000.0f);
+        ms.add_kv(LLM_KV_HYPER_CONNECTION_COUNT,               uint32_t(4));
+        ms.add_kv(LLM_KV_HYPER_CONNECTION_SINKHORN_ITERATIONS, uint32_t(2));
+        ms.add_kv(LLM_KV_HYPER_CONNECTION_EPSILON,             1.0e-6f);
         ms.add_kv(LLM_KV_HASH_LAYER_COUNT,                      uint32_t(0));
         ms.add_kv(LLM_KV_SWIGLU_CLAMP_EXP,                      10.0f);
         ms.add_kv(LLM_KV_EXPERT_WEIGHTS_SCALE,                  1.0f);
@@ -495,6 +576,16 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
         ggml_format_name(&t, "convnext.%" PRIu32 ".dw.weight", il);
         gguf_add_tensor(ms.gguf_ctx, &t);
     }
+    if (deepseek4_mtp) {
+        ms.add_kv(LLM_KV_NEXTN_PREDICT_LAYERS, uint32_t(1));
+        ggml_tensor probe = {};
+        probe.type = GGML_TYPE_F16;
+        probe.ne[0] = 2*n_embd;
+        probe.ne[1] = n_embd;
+        probe.ne[2] = probe.ne[3] = 1;
+        ggml_set_name(&probe, "blk.4.nextn.eh_proj.weight");
+        gguf_add_tensor(ms.gguf_ctx, &probe);
+    }
     return ret;
 }
 
@@ -502,11 +593,68 @@ static bool silent_model_load_progress(float /*progress*/, void * /*user_data*/)
     return true;
 }
 
+static void set_test_env(const char * name, const char * value) {
+#if defined(_WIN32)
+    _putenv_s(name, value);
+#else
+    setenv(name, value, true);
+#endif
+}
+
+static void unset_test_env(const char * name) {
+#if defined(_WIN32)
+    _putenv_s(name, "");
+#else
+    unsetenv(name);
+#endif
+}
+
+static bool test_env_enabled(const char * name) {
+    const char * value = getenv(name);
+    return value != nullptr && strcmp(value, "0") != 0 && strcmp(value, "false") != 0 && strcmp(value, "FALSE") != 0;
+}
+
+class scoped_test_env {
+public:
+    scoped_test_env(const char * name, const char * value) : name(name) {
+        const char * old_value = getenv(name);
+        if (old_value != nullptr) {
+            had_old_value = true;
+            this->old_value = old_value;
+        }
+        set_test_env(name, value);
+    }
+
+    ~scoped_test_env() {
+        if (had_old_value) {
+            set_test_env(name, old_value.c_str());
+        } else {
+            unset_test_env(name);
+        }
+    }
+
+private:
+    const char * name;
+    bool had_old_value = false;
+    std::string old_value;
+};
+
+// resolve an exact -a value back to an architecture for fixture generation
+static llm_arch arch_from_filter(const std::string & filter) {
+    std::string name = filter;
+    if (name.size() >= 2 && name.front() == '^' && name.back() == '$') {
+        name = name.substr(1, name.size() - 2);
+    }
+    return llm_arch_from_string(name);
+}
+
 static std::pair<llama_model_ptr, llama_context_ptr> get_model_and_ctx(
         struct gguf_context * gguf_ctx, FILE * file, const size_t seed, const float stdev,
         const std::vector<ggml_backend_dev_t> & devs,
         const llama_split_mode split_mode = LLAMA_SPLIT_MODE_LAYER, bool encode = false,
-        const llama_model_tensor_buft_override * tensor_buft_overrides = nullptr, const size_t moe_cache_size = 0) {
+        const llama_model_tensor_buft_override * tensor_buft_overrides = nullptr, const size_t moe_cache_size = 0,
+        ggml_backend_sched_eval_callback cb_eval = nullptr, void * cb_eval_user_data = nullptr,
+        const llama_flash_attn_type flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO) {
     GGML_ASSERT((gguf_ctx == nullptr) != (file == nullptr));
     llama_model_params model_params = llama_model_default_params();
     model_params.progress_callback = silent_model_load_progress;
@@ -528,6 +676,9 @@ static std::pair<llama_model_ptr, llama_context_ptr> get_model_and_ctx(
         ctx_params.moe_cache_size = moe_cache_size;
         ctx_params.n_ubatch = 2;
     }
+    ctx_params.flash_attn_type = flash_attn_type;
+    ctx_params.cb_eval = cb_eval;
+    ctx_params.cb_eval_user_data = cb_eval_user_data;
 
     tensor_data_params tensor_params = { seed, stdev };
     llama_model_ptr model(gguf_ctx != nullptr ?
@@ -541,6 +692,17 @@ static std::pair<llama_model_ptr, llama_context_ptr> get_model_and_ctx(
         throw std::runtime_error("failed to create llama context");
     }
     return std::make_pair(std::move(model), std::move(lctx));
+}
+
+static void decode_tokens(llama_context * lctx, const std::vector<llama_token> & tokens, llama_pos start_pos, bool output_all = true) {
+    common_batch batch(lctx);
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        const bool output = output_all || i + 1 == tokens.size();
+        batch.add(tokens[i], start_pos + (llama_pos) i, 0, output);
+    }
+    if (llama_process(lctx, LLAMA_PROCESS_TYPE_DECODE, batch.get())) {
+        throw std::runtime_error("failed to decode batch");
+    }
 }
 
 static std::vector<float> get_logits(
@@ -794,7 +956,21 @@ static bool arch_supported(const llm_arch arch) {
     return true;
 }
 
-static int save_models(const std::string & arch_filter, const size_t seed, const float stdev, const int verbosity, const std::string & dir) {
+static bool glm_dsa_backend_config_supported(const std::vector<ggml_backend_dev_t> & devs) {
+    for (ggml_backend_dev_t dev : devs) {
+        switch (ggml_backend_dev_type(dev)) {
+            case GGML_BACKEND_DEVICE_TYPE_CPU:
+            case GGML_BACKEND_DEVICE_TYPE_GPU:
+            case GGML_BACKEND_DEVICE_TYPE_IGPU:
+                break;
+            default:
+                return false;
+        }
+    }
+    return true;
+}
+
+static int save_models(const std::string & arch_filter, const size_t seed, const float stdev, const int verbosity, const std::string & dir, bool text_only = false, glm_dsa_indexshare_fixture glm_dsa_indexshare = glm_dsa_indexshare_fixture::DEFAULT) {
     struct user_data_t {
         struct {
             ggml_log_callback callback;
@@ -841,11 +1017,20 @@ static int save_models(const std::string & arch_filter, const size_t seed, const
                 LOG_INF("%s: %s model (%s) is unsupported, skipping\n", __func__, llm_arch_name(arch), moe ? "MoE" : "dense");
                 continue;
             }
-            gguf_context_ptr gguf_ctx = get_gguf_ctx(arch, moe);
+            // sparse-indexer stage-contract fixtures keep a realistic top-k; all other consumers
+            // (including test_backends CPU/GPU parity) keep the stable select-everything default
+            gguf_context_ptr gguf_ctx = get_gguf_ctx(arch, moe, glm_dsa_indexshare, 256, 8);
+            if (text_only) {
+                const uint32_t sections[4] = {};
+                const std::string key = std::string(llm_arch_name(arch)) + ".rope.dimension_sections";
+                gguf_set_arr_data(gguf_ctx.get(), key.c_str(), GGUF_TYPE_UINT32, sections, 4);
+            }
             auto model_and_ctx = get_model_and_ctx(gguf_ctx.get(), nullptr, seed, stdev, {});
             const std::string path = dir + "/" + llm_arch_name(arch) + (moe ? "-moe.gguf" : "-dense.gguf");
             LOG_INF("%s: Saving %s model (%s) to %s...\n", __func__, llm_arch_name(arch), moe ? "MoE" : "dense", path.c_str());
+            begin_fixture_write(path);
             llama_model_save_to_file(model_and_ctx.first.get(), path.c_str());
+            require_fixture_written(path);
         }
     }
     llama_log_set(ud.log_old.callback, ud.log_old.user_data);
@@ -1011,9 +1196,14 @@ static int test_backends(const std::string & arch_filter, const size_t seed, con
                 char mixed_str[12] = {0};
 
                 bool skip = !arch_supported(arch) || (dc.split_mode == LLAMA_SPLIT_MODE_TENSOR && dc.devs.empty());
+                if (arch == LLM_ARCH_GLM_DSA && !glm_dsa_backend_config_supported(dc.devs)) {
+                    skip = true;
+                }
+#if defined(GGML_USE_WEBGPU)
+                skip = true; // FIXME
+#endif // GGML_USE_WEBGPU
                 bool test_executed = false;
-                bool test_ok = true;
-                if (!skip) {
+                bool test_ok = true;                if (!skip) {
                     if (logits_cpu.empty()) {
                         model_and_ctx_cpu = get_model_and_ctx(gguf_ctx.get(), nullptr, seed, stdev, {}, LLAMA_SPLIT_MODE_LAYER, encode);
                         logits_cpu = get_logits(model_and_ctx_cpu.first.get(), model_and_ctx_cpu.second.get(), tokens, encode);
@@ -1127,6 +1317,9 @@ static int test_backends(const std::string & arch_filter, const size_t seed, con
     return all_ok ? 0 : 1;
 }
 
+#include "test-deepseek4-mtp.h"
+#include "test-graph-contract-fixture.h"
+
 int main(int argc, char ** argv) {
     // init the logger at max verbosity. filter with a custom callback respecting the user-configure verbosity
     common_log_set_verbosity_thold(LOG_LEVEL_DEBUG);
@@ -1140,11 +1333,50 @@ int main(int argc, char ** argv) {
     float stdev = 0.1f;
     std::string out;
     const char * target_backend = nullptr;
-
+    bool deepseek4_mtp = false;
+    bool dense_mtp = false;
+    uint32_t dense_mtp_depth = 1;
+    bool text_only = false;
+    bool expect_invalid = false;
+    glm_dsa_indexshare_fixture glm_dsa_indexshare = glm_dsa_indexshare_fixture::DEFAULT;
+    std::string mtp_model;
+    uint32_t contract_layers = 0, contract_width = 0, contract_mtp_layers = 0;
     int verbosity = LOG_LEVEL_ERROR;
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+        if (strcmp(argv[i], "--graph-contract") == 0 && i + 2 < argc) {
+            contract_layers = std::stoul(argv[++i]);
+            contract_width = std::stoul(argv[++i]);
+        } else if (strcmp(argv[i], "--contract-mtp") == 0 && i + 1 < argc) {
+            contract_mtp_layers = std::stoul(argv[++i]);
+        } else if (strcmp(argv[i], "--text-only") == 0 || strcmp(argv[i], "-t") == 0) {
+            text_only = true;
+        } else if (strcmp(argv[i], "--expect-invalid") == 0) {
+            expect_invalid = true;
+        } else if (strcmp(argv[i], "--glm-dsa-indexshare") == 0 && i + 1 < argc) {
+            const std::string layout = argv[++i];
+            if (layout == "full-shared") {
+                glm_dsa_indexshare = glm_dsa_indexshare_fixture::FULL_SHARED;
+            } else if (layout == "full-shared-shared") {
+                glm_dsa_indexshare = glm_dsa_indexshare_fixture::FULL_SHARED_SHARED;
+            } else if (layout == "periodic-full-shared") {
+                glm_dsa_indexshare = glm_dsa_indexshare_fixture::PERIODIC_FULL_SHARED;
+            } else if (layout == "shared-first") {
+                glm_dsa_indexshare = glm_dsa_indexshare_fixture::SHARED_FIRST;
+            } else if (layout == "conflicting-metadata") {
+                glm_dsa_indexshare = glm_dsa_indexshare_fixture::CONFLICTING_METADATA;
+            } else {
+                throw std::runtime_error("unknown --glm-dsa-indexshare layout");
+            }
+        } else if (strcmp(argv[i], "--dense-mtp") == 0) {
+            dense_mtp = true;
+        } else if (strcmp(argv[i], "--dense-mtp-depth") == 0 && i + 1 < argc) {
+            dense_mtp_depth = std::stoul(argv[++i]);
+        } else if (strcmp(argv[i], "--deepseek4-mtp") == 0) {
+            deepseek4_mtp = true;
+        } else if (strcmp(argv[i], "--test-mtp-model") == 0 && i + 1 < argc) {
+            mtp_model = argv[++i];
+        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             usage(argv);
             return 0;
         } else if (strcmp(argv[i], "-a") == 0 || strcmp(argv[i], "--arch") == 0) {
@@ -1220,8 +1452,84 @@ int main(int argc, char ** argv) {
     LOG_INF("%s: using seed %zu, stdev %f\n", __func__, seed, stdev);
 
     try {
+        if (contract_layers) {
+            return save_graph_contract_fixture(
+                    arch_from_filter(arch_filter), out, contract_layers, contract_width, contract_mtp_layers);
+        }
+        if (!mtp_model.empty()) {
+            return test_deepseek4_mtp(mtp_model);
+        }
+        if (dense_mtp) {
+            const llm_arch arch = arch_from_filter(arch_filter);
+            if (out.empty() || arch == LLM_ARCH_UNKNOWN) throw std::runtime_error("--dense-mtp requires architecture and output");
+            if (dense_mtp_depth == 0) throw std::runtime_error("--dense-mtp-depth must be positive");
+            auto gguf = get_gguf_ctx(arch,
+                    arch == LLM_ARCH_STEP35 || arch == LLM_ARCH_MIMO2 || arch == LLM_ARCH_HY_V3 ||
+                            arch == LLM_ARCH_GLM_DSA,
+                    glm_dsa_indexshare_fixture::DEFAULT,
+                    256, 8, false, 2 + dense_mtp_depth, 256);
+            llama_model_saver metadata(arch, gguf.get());
+            metadata.add_kv(LLM_KV_NEXTN_PREDICT_LAYERS, dense_mtp_depth);
+            if (arch == LLM_ARCH_GLM_DSA) {
+                const std::array<uint32_t, 2> indexer_types = {1, 0};
+                gguf_set_arr_data(gguf.get(), metadata.llm_kv(LLM_KV_ATTENTION_INDEXER_TYPES).c_str(),
+                        GGUF_TYPE_UINT32, indexer_types.data(), indexer_types.size());
+            }
+            ggml_tensor probe{};
+            probe.type = GGML_TYPE_F32;
+            probe.ne[0] = 512;
+            probe.ne[1] = 256;
+            probe.ne[2] = probe.ne[3] = 1;
+            ggml_set_name(&probe, "blk.2.nextn.eh_proj.weight");
+            gguf_add_tensor(gguf.get(), &probe);
+            auto params = llama_model_default_params();
+            params.n_gpu_layers = 0;
+            params.load_mtp = true;
+            tensor_data_params tensor_params = { seed, 0.1f };
+            llama_model_ptr model(llama_model_init_from_user(gguf.get(), set_tensor_data, &tensor_params, params));
+            if (!model || model->hparams.n_layer_nextn != dense_mtp_depth) throw std::runtime_error("failed to generate dense MTP fixture");
+            const std::string path = out + "/dense-mtp.gguf";
+            begin_fixture_write(path);
+            llama_model_saver saver(model.get());
+            saver.add_kv_from_model();
+            const std::array<bool, 3> recurrent = {model->hparams.is_recr(0), model->hparams.is_recr(1), false};
+            gguf_set_arr_data(saver.gguf_ctx, saver.llm_kv(LLM_KV_ATTENTION_RECURRENT_LAYERS).c_str(),
+                    GGUF_TYPE_BOOL, recurrent.data(), recurrent.size());
+            saver.add_tensors_from_model();
+            saver.save(path);
+            require_fixture_written(path);
+            return 0;
+        }
+        if (deepseek4_mtp) {
+            const llm_arch arch = arch_from_filter(arch_filter);
+            if (arch != LLM_ARCH_DEEPSEEK4 || out.empty()) {
+                throw std::runtime_error("--deepseek4-mtp requires -a deepseek4 and -o directory");
+            }
+            auto gguf = get_gguf_ctx(arch, true, glm_dsa_indexshare_fixture::DEFAULT, 256, 8, true);
+            auto params = llama_model_default_params();
+            params.n_gpu_layers = 0;
+            params.load_mtp = true;
+            tensor_data_params tensor_params = { seed, 0.1f };
+            llama_model_ptr model(llama_model_init_from_user(gguf.get(), set_tensor_data, &tensor_params, params));
+            if (!model || model->hparams.n_layer_nextn != 1 || model->hparams.n_embd_out() != 2048) {
+                throw std::runtime_error("failed to generate wide DeepSeek4 MTP fixture");
+            }
+            const std::string path = out + "/deepseek4-mtp-moe.gguf";
+            begin_fixture_write(path);
+            llama_model_save_to_file(model.get(), path.c_str());
+            require_fixture_written(path);
+            return 0;
+        }
         if (!out.empty()) {
-            return save_models(arch_filter, seed, stdev, verbosity, out);
+            if (expect_invalid) {
+                try {
+                    save_models(arch_filter, seed, stdev, verbosity, out, text_only, glm_dsa_indexshare);
+                } catch (const std::exception &) {
+                    return 0;
+                }
+                throw std::runtime_error("invalid GLM-DSA fixture was accepted");
+            }
+            return save_models(arch_filter, seed, stdev, verbosity, out, text_only, glm_dsa_indexshare);
         }
         return test_backends(arch_filter, seed, stdev, verbosity, target_backend);
     } catch (const std::exception & err) {

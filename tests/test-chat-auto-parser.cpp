@@ -74,9 +74,11 @@ static void test_laguna_s_preserve_reasoning(testing & t);
 static void test_laguna_xs2_analysis(testing & t);
 static void test_laguna_xs2_reasoning_detection(testing & t);
 static void test_laguna_xs2_tool_format(testing & t);
+static void test_nemotron_lazy_tool_trigger(testing & t);
 
 // CohereForAI template analysis tests
 static void test_cohere_reasoning_detection(testing & t);
+static void test_thinking_alias_reasoning_detection(testing & t);
 static void test_cohere_analysis(testing & t);
 
 // SmolLM3 template analysis tests
@@ -1763,6 +1765,7 @@ static common_chat_template load_nemotron_template(testing & t) {
 static void test_nemotron_analysis(testing & t) {
     t.test("Nemotron reasoning detection", test_nemotron_reasoning_detection);
     t.test("Nemotron tool format", test_nemotron_tool_format);
+    t.test("Nemotron lazy tool trigger", test_nemotron_lazy_tool_trigger);
 }
 
 static void test_nemotron_reasoning_detection(testing & t) {
@@ -1928,12 +1931,56 @@ static void test_laguna_xs2_analysis(testing & t) {
     t.test("Laguna-XS.2(v5) tool format", test_laguna_xs2_tool_format);
 }
 
+static void test_nemotron_lazy_tool_trigger(testing & t) {
+    common_chat_template tmpl = load_nemotron_template(t);
+
+    generation_params params;
+    params.messages              = json::array({ json{{"role", "user"}, {"content", "Call the test function."}} });
+    params.tools                 = build_tools_definition();
+    params.tool_choice           = COMMON_CHAT_TOOL_CHOICE_AUTO;
+    params.add_generation_prompt = true;
+    params.enable_thinking       = true;
+    params.extra_context         = json::object();
+
+    auto generated = peg_generator::generate_parser(tmpl, params);
+
+    t.assert_true("auto tools should use lazy grammar", generated.grammar_lazy);
+    t.assert_equal("should emit one lazy grammar trigger", size_t(1), generated.grammar_triggers.size());
+    if (!generated.grammar_triggers.empty()) {
+        t.assert_equal("lazy trigger should be a word trigger", static_cast<int>(COMMON_GRAMMAR_TRIGGER_TYPE_WORD),
+                       static_cast<int>(generated.grammar_triggers[0].type));
+        t.assert_equal("lazy trigger should trim trailing whitespace", "<tool_call>", generated.grammar_triggers[0].value);
+    }
+    t.assert_true("grammar should still preserve the full tool marker",
+                  generated.grammar.find("tool-call ::= \"<tool_call>\\n\"") != std::string::npos);
+}
+
 static common_chat_template load_cohere_template(testing & t) {
     return load_template(t, "models/templates/CohereForAI-c4ai-command-r7b-12-2024-tool_use.jinja");
 }
 
 static void test_cohere_analysis(testing & t) {
     t.test("Cohere reasoning detection", test_cohere_reasoning_detection);
+    t.test("thinking field reasoning detection", test_thinking_alias_reasoning_detection);
+}
+
+static void test_thinking_alias_reasoning_detection(testing & t) {
+    const std::string template_source = R"(
+{%- for message in messages %}
+{%- if message.role == 'user' %}<|USER|>{{ message.content }}
+{%- elif message.role == 'assistant' %}<|ASSISTANT|>{% if message.thinking %}<|START_THINKING|>{{ message.thinking }}<|END_THINKING|>{% endif %}<|START_RESPONSE|>{{ message.content }}<|END_RESPONSE|>
+{%- endif %}
+{%- endfor %}
+{%- if add_generation_prompt %}<|ASSISTANT|>{% endif %})";
+    common_chat_template tmpl(template_source, "", "");
+
+    struct autoparser analysis;
+    analysis.analyze_template(tmpl);
+
+    t.assert_equal("thinking alias should use tag-based reasoning", reasoning_mode::TAG_BASED,
+                   analysis.reasoning.mode);
+    t.assert_equal("thinking alias start marker", "<|START_THINKING|>", analysis.reasoning.start);
+    t.assert_equal("thinking alias end marker", "<|END_THINKING|>", analysis.reasoning.end);
 }
 
 static void test_cohere_reasoning_detection(testing & t) {
