@@ -1,0 +1,59 @@
+#include "skippy/common.h"
+
+#include <cstdlib>
+
+struct skippy_abi_version skippy_abi_version(void) {
+    return {
+        SKIPPY_ABI_VERSION_MAJOR,
+        SKIPPY_ABI_VERSION_MINOR,
+        SKIPPY_ABI_VERSION_PATCH,
+    };
+}
+
+uint64_t skippy_abi_features(void) {
+    return SKIPPY_FEATURE_RUNTIME_SLICE |
+           SKIPPY_FEATURE_MODEL_INTROSPECTION |
+           SKIPPY_FEATURE_STATE_IMPORT_EXPORT |
+           SKIPPY_FEATURE_TOKENIZE_DETOKENIZE |
+           SKIPPY_FEATURE_ACTIVATION_FRAME |
+           SKIPPY_FEATURE_NATIVE_KV_PAGE |
+           SKIPPY_FEATURE_SESSION_RESET |
+           SKIPPY_FEATURE_BATCH_VERIFY |
+           SKIPPY_FEATURE_CHAT_TEMPLATE |
+           SKIPPY_FEATURE_SAMPLING_CONFIG |
+           SKIPPY_FEATURE_BATCH_VERIFY_FRAME |
+           SKIPPY_FEATURE_RECURRENT_STATE |
+           SKIPPY_FEATURE_LOGIT_BIAS |
+           SKIPPY_FEATURE_SESSION_TRIM |
+           SKIPPY_FEATURE_STAGE_PLAN |
+           SKIPPY_FEATURE_PACKAGE_PART_LOAD |
+           SKIPPY_FEATURE_GENERATION_SIGNALS |
+           SKIPPY_FEATURE_EXTERNAL_MEDIA_PREFILL |
+           SKIPPY_FEATURE_CHAT_TEMPLATE_TOOLS |
+           SKIPPY_FEATURE_CHAT_SAMPLING_GRAMMAR |
+           SKIPPY_FEATURE_RUNTIME_EVENTS |
+           SKIPPY_FEATURE_BACKEND_DEVICES |
+           SKIPPY_FEATURE_NATIVE_MTP_N1 |
+           SKIPPY_FEATURE_NGRAM_CACHE_DRAFT |
+           SKIPPY_FEATURE_MTP_MULTIMODAL |
+           SKIPPY_FEATURE_ITERATION_BATCH |
+           SKIPPY_FEATURE_ACTIVATION_BOUNDARY |
+           SKIPPY_FEATURE_MODEL_SOURCE |
+           SKIPPY_FEATURE_RUNTIME_EVENT_REPORTER |
+           SKIPPY_FEATURE_MODEL_LOAD_EVENTS_V2 |
+           SKIPPY_FEATURE_KV_EVENTS |
+           SKIPPY_FEATURE_DEVICE_EVENTS |
+           SKIPPY_FEATURE_DIAGNOSTIC_EVENTS |
+           SKIPPY_FEATURE_UNLOAD_EVENTS |
+           SKIPPY_FEATURE_NON_CHAT_WORKLOADS |
+           SKIPPY_FEATURE_CACHEGEN_KV_PAGE;
+}
+
+void skippy_error_free(struct skippy_error * error) {
+    if (error == nullptr) {
+        return;
+    }
+
+    std::free(const_cast<char *>(error->message));
+    delete error;
+}
