@@ -200,6 +200,8 @@ llama_model_deepseek32::graph::graph(const llama_model & model, const llm_graph_
 
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
+    ggml_tensor * shared_top_k = nullptr;
+
     for (int il = 0; il < n_layer; ++il) {
         ggml_tensor * inpSA = inpL;
 
@@ -217,8 +219,15 @@ llama_model_deepseek32::graph::graph(const llama_model & model, const llm_graph_
 
             ggml_tensor * top_k = nullptr;
 
+            const bool has_indexer =
+                model.layers[il].indexer_attn_q_b &&
+                model.layers[il].indexer_attn_k &&
+                model.layers[il].indexer_k_norm &&
+                model.layers[il].indexer_k_norm_b &&
+                model.layers[il].indexer_proj;
+
             // lightning indexer
-            {
+            if (has_indexer) {
                 ggml_tensor * indexer_q = ggml_mul_mat(ctx0, model.layers[il].indexer_attn_q_b, qr);
                 cb(indexer_q, "indexer_q", il);
 
@@ -314,6 +323,11 @@ llama_model_deepseek32::graph::graph(const llama_model & model, const llm_graph_
                 uint32_t n_top_k = indexer_score->ne[0] < n_indexer_top_k ? indexer_score->ne[0] : n_indexer_top_k;
                 top_k = ggml_cont(ctx0, ggml_top_k(ctx0, indexer_score, n_top_k));
                 cb(top_k, "top_k", il);
+                shared_top_k = top_k;
+            } else {
+                GGML_ASSERT(shared_top_k != nullptr && "DSA IndexShare layer requires a previous top-k");
+                top_k = shared_top_k;
+                cb(top_k, "top_k_shared", il);
             }
 
             ggml_tensor * q = ggml_mul_mat(ctx0, model.layers[il].wq_b, qr);

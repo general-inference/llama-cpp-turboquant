@@ -22,8 +22,13 @@ llama_model_nemotron_h_moe::graph_mtp::graph_mtp(const llama_model & model, cons
     GGML_ASSERT(layer.ffn_gate_inp);
 
     // token embedding weights
-    ggml_tensor * tok_embd_w = layer.nextn.embed_tokens ? layer.nextn.embed_tokens : model.tok_embd;
-    GGML_ASSERT(tok_embd_w != nullptr && "NEMOTRON_H_MOE MTP requires token embeddings");
+    // A standalone NextN-only draft omits token_embd/output and shares the
+    // trunk tensors through ctx_other.
+    const llama_model * trunk = cparams.ctx_other != nullptr ? llama_get_model(cparams.ctx_other) : nullptr;
+    ggml_tensor * tok_embd_w = layer.nextn.embed_tokens ? layer.nextn.embed_tokens
+                          : (model.tok_embd          ? model.tok_embd
+                          : (trunk                   ? trunk->tok_embd : nullptr));
+    GGML_ASSERT(tok_embd_w != nullptr && "NEMOTRON_H_MOE MTP requires token embeddings (own or shared trunk)");
 
     auto inp = std::make_unique<llm_graph_input_embd_h>(hparams.n_embd_inp(), hparams.n_embd);
 
@@ -96,20 +101,13 @@ llama_model_nemotron_h_moe::graph_mtp::graph_mtp(const llama_model & model, cons
         ggml_tensor * router_logits = build_lora_mm(layer.ffn_gate_inp, cur);
         cb(router_logits, "mtp_ffn_moe_logits", il);
 
-        ggml_tensor * ffn_shexp = build_ffn(cur,
-                layer.ffn_up_shexp,   NULL, layer.ffn_up_shexp_s,
-                NULL,                 NULL, NULL,
-                layer.ffn_down_shexp, NULL, layer.ffn_down_shexp_s,
-                NULL,
-                LLM_FFN_RELU_SQR, LLM_FFN_PAR, il);
-        cb(ffn_shexp, "mtp_ffn_shexp", il);
-
+        ggml_tensor * inp_latent = cur;
         if (layer.ffn_latent_down) {
-            cur = ggml_mul_mat(ctx0, layer.ffn_latent_down, cur);
+            inp_latent = ggml_mul_mat(ctx0, layer.ffn_latent_down, cur);
         }
 
         ggml_tensor * moe_out =
-            build_moe_ffn(cur,
+            build_moe_ffn(inp_latent,
                 layer.ffn_gate_inp,
                 layer.ffn_up_exps,
                 nullptr, // no gate
@@ -128,7 +126,16 @@ llama_model_nemotron_h_moe::graph_mtp::graph_mtp(const llama_model & model, cons
 
         if (layer.ffn_latent_up) {
             moe_out = ggml_mul_mat(ctx0, layer.ffn_latent_up, moe_out);
+            cb(moe_out, "mtp_ffn_moe_latent_up", il);
         }
+
+        ggml_tensor * ffn_shexp = build_ffn(cur,
+                layer.ffn_up_shexp,   NULL, layer.ffn_up_shexp_s,
+                NULL,                 NULL, NULL,
+                layer.ffn_down_shexp, NULL, layer.ffn_down_shexp_s,
+                NULL,
+                LLM_FFN_RELU_SQR, LLM_FFN_PAR, il);
+        cb(ffn_shexp, "mtp_ffn_shexp", il);
 
         cur = ggml_add(ctx0, moe_out, ffn_shexp);
         cb(cur, "mtp_ffn_out", il);
@@ -149,9 +156,13 @@ llama_model_nemotron_h_moe::graph_mtp::graph_mtp(const llama_model & model, cons
     }
 
     // LM head
-    ggml_tensor * head_w = layer.nextn.shared_head_head ? layer.nextn.shared_head_head : model.output;
-    ggml_tensor * head_s = layer.nextn.shared_head_head ? layer.nextn.shared_head_head_s : model.output_s;
-    GGML_ASSERT(head_w != nullptr && "NEMOTRON_H_MOE MTP requires an output projection");
+    ggml_tensor * head_w = layer.nextn.shared_head_head ? layer.nextn.shared_head_head
+                        : (model.output                ? model.output
+                        : (trunk                       ? trunk->output : nullptr));
+    ggml_tensor * head_s = layer.nextn.shared_head_head ? layer.nextn.shared_head_head_s
+                        : (model.output_s              ? model.output_s
+                        : (trunk                       ? trunk->output_s : nullptr));
+    GGML_ASSERT(head_w != nullptr && "NEMOTRON_H_MOE MTP requires an output projection (own or shared trunk)");
     cur = build_lora_mm(head_w, cur, head_s);
     cb(cur, "result_output", -1);
 

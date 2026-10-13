@@ -181,8 +181,8 @@ llama_model_minicpm3::graph::graph(const llama_model & model, const llm_graph_pa
             ggml_tensor * q_states = q;
             cb(q_states, "q_states", il);
 
-            ggml_tensor * k_states = ggml_concat(ctx0, k_nope,
-                    ggml_repeat_4d(ctx0, k_pe, n_embd_head_qk_rope, n_head, n_tokens, 1), 0);
+            ggml_tensor * k_pe_repeated = ggml_repeat_4d(ctx0, k_pe, n_embd_head_qk_rope, n_head, n_tokens, 1);
+            ggml_tensor * k_states = ggml_concat(ctx0, k_nope, k_pe_repeated, 0);
             cb(k_states, "k_states", il);
 
             cur = build_attn(inp_attn,

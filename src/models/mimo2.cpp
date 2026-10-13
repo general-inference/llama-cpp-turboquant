@@ -9,6 +9,9 @@ void llama_model_mimo2::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_ATTENTION_SLIDING_WINDOW,   hparams.n_swa);
     ml.get_key(LLM_KV_ROPE_FREQ_BASE_SWA,         hparams.rope_freq_base_train_swa, false);
 
+    // Some conversions append the SWA pattern for the MTP blocks as well; the
+    // trunk uses the leading n_layer() entries. Read the array tolerantly
+    // instead of requiring an exact length.
     ml.get_arr(LLM_KV_ATTENTION_SLIDING_WINDOW_PATTERN, hparams.is_swa_impl);
 
     float value_scale = 0.0f;
@@ -147,6 +150,7 @@ llama_model_mimo2::graph::graph(const llama_model & model, const llm_graph_param
                 Kcur = ggml_reshape_3d(ctx0, Kcur, n_embd_head_k, n_head_kv_l, n_tokens);
                 Vcur = ggml_reshape_3d(ctx0, Vcur, n_embd_head_v, n_head_kv_l, n_tokens);
             }
+
 
             Qcur = ggml_rope_ext(
                 ctx0, Qcur, inp_pos, nullptr,
@@ -376,10 +380,17 @@ llama_model_mimo2::graph_mtp::graph_mtp(const llama_model & model, const llm_gra
     cur = ggml_add(ctx0, cur, ffn_inp);
     cb(cur, "mtp_post_ffn", il);
 
+    if (!cparams.embeddings_nextn_masked) {
+        cb(cur, "h_nextn", -1);
+        res->t_h_nextn = cur;
+    }
+
     cur = ggml_get_rows(ctx0, cur, inp_out_ids);
 
-    cb(cur, "h_nextn", -1);
-    res->t_h_nextn = cur;
+    if (cparams.embeddings_nextn_masked) {
+        cb(cur, "h_nextn", -1);
+        res->t_h_nextn = cur;
+    }
 
     ggml_tensor * head_norm_w = layer.nextn.shared_head_norm
             ? layer.nextn.shared_head_norm

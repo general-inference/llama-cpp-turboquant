@@ -730,6 +730,15 @@ llama_model_qwen4exp::llm_graph_input_kpool * llama_model_qwen4exp::graph::build
     inp->new_pool_pos = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, 4*inp->n_new);
     ggml_set_input(inp->new_pool_pos);
 
+    request_input(inp->k_idxs,        "qwen4exp.kpool.key_indices");
+    request_input(inp->pool_cells,    "qwen4exp.kpool.cells");
+    request_input(inp->pool_idxs,     "qwen4exp.kpool.idxs");
+    request_input(inp->pool_mask,     "qwen4exp.kpool.mask");
+    request_input(inp->tail_idxs,     "qwen4exp.kpool.tail_idxs");
+    request_input(inp->new_pool_idxs, "qwen4exp.kpool.new_idxs");
+    request_input(inp->new_pool_rep,  "qwen4exp.kpool.new_rep");
+    request_input(inp->new_pool_pos,  "qwen4exp.kpool.new_pos");
+
     return (llm_graph_input_kpool *) res->add_input(std::move(inp));
 }
 
@@ -1067,7 +1076,7 @@ ggml_tensor * llama_model_qwen4exp::graph::build_layer_attn_linear(
     ggml_tensor * conv_input = build_conv_state_at(inp, conv_states_all, qkv_mixed,
             conv_kernel_size - 1, conv_channels, il);
 
-    ggml_tensor * state = build_rs(inp, ssm_states_all, hparams.n_embd_s(), n_seqs);
+    ggml_tensor * state = build_rs(inp, ssm_states_all, hparams.n_embd_s(), n_seqs, skippy_state_kind::recurrent_ssm, il);
     state = ggml_reshape_4d(ctx0, state, head_v_dim, head_v_dim, num_v_heads, n_seqs);
     cb(state, "state_predelta", il);
 
@@ -1311,7 +1320,7 @@ ggml_tensor * llama_model_qwen4exp::graph::build_conv_state_at(
 
     auto it = rs_rows.find(conv_states_all);
     if (it == rs_rows.end()) {
-        it = rs_rows.emplace(conv_states_all, build_rs(inp, conv_states_all, row_total, n_seqs)).first;
+        it = rs_rows.emplace(conv_states_all, build_rs(inp, conv_states_all, row_total, n_seqs, skippy_state_kind::recurrent_conv, il)).first;
     }
     ggml_tensor * rows = it->second;
 
@@ -1340,7 +1349,9 @@ ggml_tensor * llama_model_qwen4exp::graph::build_conv_state_at(
                 conv_states_all->nb[1],
                 (slot * mem_size + kv_head) * row_size);
 
-        ggml_build_forward_expand(gf, ggml_cpy(ctx0, ggml_cont(ctx0, tail), dst));
+        ggml_tensor * conv_write = ggml_cpy(ctx0, ggml_cont(ctx0, tail), dst);
+        ggml_build_forward_expand(gf, conv_write);
+        state_write(skippy_state_kind::recurrent_conv, conv_states_all, conv_write, il);
     }
 
     return conv_input;
@@ -1355,6 +1366,7 @@ ggml_tensor * llama_model_qwen4exp::graph::build_inp_ple(
 
     ple_inp->rows = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_heads * n_tokens);
     ggml_set_input(ple_inp->rows);
+    request_input(ple_inp->rows, "qwen4exp.ple.rows");
     ggml_tensor * rows = ple_inp->rows;
     res->add_input(std::move(ple_inp));
 

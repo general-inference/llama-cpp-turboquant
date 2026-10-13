@@ -56,14 +56,77 @@ void llama_model_glm_dsa::load_arch_hparams(llama_model_loader & ml) {
         hparams.expert_gating_func =  LLAMA_EXPERT_GATING_FUNC_TYPE_SIGMOID;
     }
 
-    // BC for GLM 5, 5.1 (full indexers) without indexer_types metadata
+    const bool has_indexer_frequency = ml.get_key(
+            LLM_KV_ATTENTION_INDEXER_TOP_K_FREQUENCY, hparams.indexer_top_k_freq, false);
+    ml.get_key(LLM_KV_ATTENTION_INDEXER_SKIP_TOP_K_OFFSET, hparams.indexer_skip_top_k_offset, false);
+
+    // BC for GLM 5 and 5.1 (full indexers) and the first GLM 5.2
+    // conversions, which omitted explicit IndexShare metadata.
     const bool is_pre_5_2 = hparams.n_ctx_train < 1048576;
     if (is_pre_5_2) {
         std::fill(hparams.is_indexer_full_impl.begin(), hparams.is_indexer_full_impl.end(), 1);
     } else {
         hparams.is_indexer_full_impl = GLM_5_2_DEFAULT_INDEXER_TYPES;
     }
-    ml.get_key_or_arr(LLM_KV_ATTENTION_INDEXER_TYPES, hparams.is_indexer_full_impl, hparams.n_layer(), false);
+
+    if (hparams.indexer_top_k_freq > 0) {
+        for (uint32_t il = 0; il < hparams.n_layer(); ++il) {
+            const uint32_t offset = hparams.indexer_skip_top_k_offset;
+            hparams.is_indexer_full_impl[il] =
+                il < offset || (il >= offset && ((il - offset + 1) % hparams.indexer_top_k_freq) == 0);
+        }
+    }
+    const auto frequency_indexer_types = hparams.is_indexer_full_impl;
+
+    bool has_explicit_indexer_types = false;
+    try {
+        std::vector<std::string> indexer_types;
+        if (ml.get_arr(LLM_KV_ATTENTION_INDEXER_TYPES, indexer_types, false)) {
+            if (indexer_types.size() != hparams.n_layer()) {
+                throw std::runtime_error(
+                    "glm-dsa.attention.indexer.types length must match the decoder layer count");
+            }
+            for (uint32_t il = 0; il < hparams.n_layer(); ++il) {
+                const std::string & role = indexer_types[il];
+                if (role == "full") {
+                    hparams.is_indexer_full_impl[il] = 1;
+                } else if (role == "shared") {
+                    hparams.is_indexer_full_impl[il] = 0;
+                } else {
+                    throw std::runtime_error(
+                        "glm-dsa.attention.indexer.types values must be full or shared");
+                }
+            }
+            has_explicit_indexer_types = true;
+        }
+    } catch (const std::runtime_error & error) {
+        if (std::string(error.what()).find("wrong array element type") == std::string::npos) {
+            throw;
+        }
+        // Older GGUF writers represented the same roles as 0/1 integers.
+        has_explicit_indexer_types = ml.get_key_or_arr(
+            LLM_KV_ATTENTION_INDEXER_TYPES,
+            hparams.is_indexer_full_impl,
+            hparams.n_layer(),
+            false);
+    }
+
+    hparams.indexer_types_present = has_explicit_indexer_types;
+    for (uint32_t il = 0; il < hparams.n_layer(); ++il) {
+        if (hparams.is_indexer_full_impl[il] > 1) {
+            throw std::runtime_error(
+                "glm-dsa.attention.indexer.types numeric values must be 0 or 1");
+        }
+        if (has_explicit_indexer_types && has_indexer_frequency &&
+                hparams.is_indexer_full_impl[il] != frequency_indexer_types[il]) {
+            throw std::runtime_error(
+                "glm-dsa.attention.indexer.types conflicts with top_k_frequency metadata");
+        }
+        hparams.indexer_types[il] = static_cast<int32_t>(hparams.is_indexer_full_impl[il]);
+    }
+    if (hparams.n_layer() > 0 && !hparams.is_indexer_full(0)) {
+        throw std::runtime_error("glm-dsa layer 0 must be a full IndexShare producer");
+    }
 
     switch (hparams.n_layer()) {
         case 78: type = LLM_TYPE_744B_A40B; break;
@@ -202,6 +265,9 @@ llama_model_glm_dsa::graph::graph(const llama_model & model, const llm_graph_par
 
     // the indexer head layout is [rope | nope]
     GGML_ASSERT(hparams.n_rot() <= n_embd_indexer_head);
+    const int64_t n_embd_indexer_head_rope = hparams.n_rot();
+    const int64_t n_embd_indexer_head_nope = n_embd_indexer_head - n_embd_indexer_head_rope;
+    GGML_ASSERT(n_embd_indexer_head_nope >= 1);
 
     const uint32_t kv_lora_rank = hparams.n_lora_kv;
 

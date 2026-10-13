@@ -172,7 +172,8 @@ llama_model_qwen3vl::graph::graph(const llama_model & model, const llm_graph_par
     // lm_head
     cur = build_lora_mm(model.output, cur, model.output_s);
 
-    int64_t n_vocab_in  = model.tok_embd->ne[1];
+    int64_t n_vocab_in  = model.tok_embd ? model.tok_embd->ne[1]
+                                         : (int64_t) model.vocab.n_tokens();
     int64_t n_vocab_out = model.output->ne[1];
     if (n_vocab_in > n_vocab_out) {
         // case: Qwen3TTS model with codec_head as output

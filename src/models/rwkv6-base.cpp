@@ -130,7 +130,7 @@ ggml_tensor * llm_build_rwkv6_base::build_rwkv6_time_mix(llm_graph_input_rs * in
         // k = k * (1 - w)
         k = ggml_sub(ctx0, k, ggml_mul(ctx0, k, w));
     }
-    ggml_tensor * wkv_state = build_rs(inp, mctx_cur->get_s_l(il), hparams.n_embd_s(), n_seqs);
+    ggml_tensor * wkv_state = build_rs(inp, mctx_cur->get_s_l(il), hparams.n_embd_s(), n_seqs, skippy_state_kind::recurrent_ssm, il);
 
     ggml_tensor * wkv_output;
     if (is_qrwkv) {
@@ -141,10 +141,11 @@ ggml_tensor * llm_build_rwkv6_base::build_rwkv6_time_mix(llm_graph_input_rs * in
     cur       = ggml_view_1d(ctx0, wkv_output, n_embd * n_tokens, 0);
     wkv_state = ggml_view_1d(ctx0, wkv_output, n_embd * head_size * n_seqs, n_embd * n_tokens * sizeof(float));
 
-    ggml_build_forward_expand(
-        gf, ggml_cpy(ctx0, wkv_state,
+    ggml_tensor * wkv_state_write = ggml_cpy(ctx0, wkv_state,
                      ggml_view_1d(ctx0, mctx_cur->get_s_l(il), hparams.n_embd_s() * n_seqs,
-                                  hparams.n_embd_s() * kv_head * ggml_element_size(mctx_cur->get_s_l(il)))));
+                                  hparams.n_embd_s() * kv_head * ggml_element_size(mctx_cur->get_s_l(il))));
+    ggml_build_forward_expand(gf, wkv_state_write);
+    state_write(skippy_state_kind::recurrent_ssm, mctx_cur->get_s_l(il), wkv_state_write, il);
 
     if (!is_qrwkv) {
         // group norm with head_count groups

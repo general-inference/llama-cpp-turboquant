@@ -7,8 +7,9 @@
 // input dim:  [x, y, c, b]
 // output dim: [x, y, 1, b]
 static ggml_tensor * get_slice_2d(ggml_context * ctx0, ggml_tensor * t, int64_t c) {
-    return ggml_view_4d(ctx0, t, t->ne[0], t->ne[1], 1, t->ne[3],
+    ggml_tensor * result = ggml_view_4d(ctx0, t, t->ne[0], t->ne[1], 1, t->ne[3],
         t->nb[1], t->nb[2], t->nb[3], t->nb[2] * c);
+    return result;
 }
 
 llm_build_delta_net_base::llm_build_delta_net_base(const llm_graph_params & params) : llm_graph_context(params) {}
@@ -457,7 +458,7 @@ ggml_tensor * llm_build_delta_net_base::build_conv_state(
 
     const int64_t n_seqs = ubatch.n_seqs;
 
-    ggml_tensor * conv_states = build_rs(inp, conv_states_all, hparams.n_embd_r(), n_seqs);
+    ggml_tensor * conv_states = build_rs(inp, conv_states_all, hparams.n_embd_r(), n_seqs, skippy_state_kind::recurrent_conv, il);
     cb(conv_states, "conv_states", il);
 
     conv_states = ggml_reshape_3d(ctx0, conv_states, conv_kernel_size - 1, conv_channels, n_seqs);
@@ -490,7 +491,9 @@ ggml_tensor * llm_build_delta_net_base::build_conv_state(
                     (s_slot * mem_size + kv_head) * row_size);
         cb(conv_state_update, "conv_state_update", il);
 
-        ggml_build_forward_expand(gf, ggml_cpy(ctx0, conv_state_last, conv_state_update));
+        ggml_tensor * conv_write = ggml_cpy(ctx0, conv_state_last, conv_state_update);
+        ggml_build_forward_expand(gf, conv_write);
+        state_write(skippy_state_kind::recurrent_conv, conv_states_all, conv_write, il);
     } else {
         // [TAG_RECURRENT_ROLLBACK_SPLITS]
         // this logic assumes that the last (n_rs_seq + 1) tokens of a sequence in a batch are inside
@@ -514,7 +517,9 @@ ggml_tensor * llm_build_delta_net_base::build_conv_state(
                         conv_states_all->nb[1],
                         (s_slot * mem_size + kv_head) * row_size);
 
-            ggml_build_forward_expand(gf, ggml_cpy(ctx0, conv_state_last, conv_state_update));
+            ggml_tensor * conv_write = ggml_cpy(ctx0, conv_state_last, conv_state_update);
+            ggml_build_forward_expand(gf, conv_write);
+            state_write(skippy_state_kind::recurrent_conv, conv_states_all, conv_write, il);
         }
     }
 
@@ -549,10 +554,12 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
         cb(output, "attn_output", il);
         cb(new_state, "new_state", il);
 
-        ggml_build_forward_expand(gf,
-                ggml_cpy(ctx0, new_state,
-                    ggml_view_2d(ctx0, ssm_states_all, hparams.n_embd_s(), n_seqs, ssm_states_all->nb[1],
-                        kv_head * hparams.n_embd_s() * ggml_element_size(ssm_states_all))));
+        ggml_tensor * state_destination = ggml_view_2d(
+                ctx0, ssm_states_all, hparams.n_embd_s(), n_seqs, ssm_states_all->nb[1],
+                kv_head * hparams.n_embd_s() * ggml_element_size(ssm_states_all));
+        ggml_tensor * ssm_write = ggml_cpy(ctx0, new_state, state_destination);
+        ggml_build_forward_expand(gf, ssm_write);
+        state_write(skippy_state_kind::recurrent_ssm, ssm_states_all, ssm_write, il);
 
         return output;
     }
@@ -597,7 +604,9 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
         (size_t) mem_size * row_size,
         (size_t) kv_head * row_size);
 
-    ggml_build_forward_expand(gf, ggml_cpy(ctx0, src, dst));
+    ggml_tensor * ssm_write = ggml_cpy(ctx0, src, dst);
+    ggml_build_forward_expand(gf, ssm_write);
+    state_write(skippy_state_kind::recurrent_ssm, ssm_states_all, ssm_write, il);
 
     return output;
 }

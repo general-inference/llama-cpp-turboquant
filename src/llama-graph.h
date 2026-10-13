@@ -5,11 +5,17 @@
 #include "llama-hparams.h"
 #include "llama-adapter.h"
 
+#include "skippy/block_boundaries.h"
+#include "skippy/graph_identity.h"
+#include "skippy/state_effects.h"
+
+#include <array>
 #include <cstdint>
 #include <cstdlib>
 #include <vector>
 #include <memory>
 #include <set>
+#include <string>
 #include <functional>
 #include <map>
 
@@ -36,6 +42,67 @@ class llama_kv_cache_iswa_context;
 class llama_memory_recurrent_context;
 class llama_memory_hybrid_context;
 class llama_memory_hybrid_iswa_context;
+
+enum skippy_glm_dsa_phase_hint : int32_t {
+    SKIPPY_GLM_DSA_PHASE_HINT_AUTO = 0,
+    SKIPPY_GLM_DSA_PHASE_HINT_PREFILL = 1,
+    SKIPPY_GLM_DSA_PHASE_HINT_DECODE = 2,
+    SKIPPY_GLM_DSA_PHASE_HINT_VERIFY = 3,
+};
+
+struct skippy_graph_selection {
+    bool enabled = false;
+    int32_t layer_start = 0;
+    int32_t layer_end = 0;
+    int32_t glm_dsa_policy_profile = 0;
+    uint32_t glm_dsa_policy_flags = 0;
+    int32_t glm_dsa_short_prefill_max_tokens = 0;
+    int32_t glm_dsa_direct_sparse_decode_max_top_k = 0;
+    uint64_t glm_dsa_dense_sparse_mask_max_bytes = 0;
+    int32_t glm_dsa_compact_flash_min_kv = 0;
+    int32_t glm_dsa_phase_hint = SKIPPY_GLM_DSA_PHASE_HINT_AUTO;
+};
+
+struct skippy_activation_tokens {
+    const llama_token * tokens = nullptr;
+    uint32_t token_count = 0;
+};
+
+struct skippy_activation_mtp_embeddings {
+    const float * values = nullptr;
+    uint32_t token_count = 0;
+    uint32_t n_embd = 0;
+    llama_pos pos_start = 0;
+};
+
+struct skippy_activation_frontier_part_input {
+    const void * values = nullptr;
+    uint64_t payload_bytes = 0;
+    uint32_t ggml_type = 0;
+    uint32_t rank = 0;
+    int32_t token_axis = -1;
+    int64_t dimensions[GGML_MAX_DIMS] = {};
+    uint64_t byte_strides[GGML_MAX_DIMS] = {};
+    llama_pos pos_start = 0;
+    std::vector<llama_seq_id> sequence_ids;
+    std::vector<uint64_t> sequence_offsets;
+    std::vector<llama_pos> sequence_pos_starts;
+};
+
+struct skippy_graph_build_inputs {
+    skippy_graph_selection selection;
+    skippy_activation_tokens activation_tokens;
+    skippy_activation_mtp_embeddings mtp_embeddings;
+    std::vector<skippy_activation_frontier_part_input> activation_frontier;
+    std::vector<std::string> activation_import_identities;
+    std::vector<std::string> activation_import_bindings;
+    std::vector<std::string> activation_export_identities;
+    std::vector<std::string> activation_export_bindings;
+    std::vector<std::string> resident_tensor_names;
+    std::string execution_contract;
+
+    bool topology_equal(const skippy_graph_build_inputs & other) const;
+};
 
 // certain models (typically multi-modal) can produce different types of graphs
 enum llm_graph_type {
@@ -112,6 +179,10 @@ public:
 
     virtual ~llm_graph_input_i() = default;
 
+    virtual void set_build_inputs(const skippy_graph_build_inputs & inputs) {
+        GGML_UNUSED(inputs);
+    }
+
     virtual void set_input(const llama_ubatch * ubatch) = 0;
 
     // Persistent context data outside llama_memory is not preserved by any
@@ -135,7 +206,9 @@ using llm_graph_input_ptr = std::unique_ptr<llm_graph_input_i>;
 
 class llm_graph_input_embd : public llm_graph_input_i {
 public:
-    llm_graph_input_embd(int64_t n_embd) : n_embd(n_embd) {}
+    llm_graph_input_embd(int64_t n_embd, bool allow_embeddings = true)
+        : allow_embeddings(allow_embeddings), n_embd(n_embd) {}
+    const bool allow_embeddings;
     virtual ~llm_graph_input_embd() = default;
 
     void set_input(const llama_ubatch * ubatch) override;
@@ -162,6 +235,8 @@ public:
 
     void set_input(const llama_ubatch * ubatch) override;
 
+    void set_build_inputs(const skippy_graph_build_inputs & inputs) override;
+
     bool can_reuse(const llm_graph_params & params) override;
 
     ggml_tensor * tokens = nullptr; // I32 [n_batch]
@@ -170,6 +245,9 @@ public:
 
     const int64_t n_embd       = 0;
     const int64_t n_embd_state = 0;
+
+private:
+    skippy_activation_mtp_embeddings mtp_embeddings;
 };
 
 class llm_graph_input_pos : public llm_graph_input_i {
@@ -662,6 +740,13 @@ public:
     const llama_kv_cache_dsv4_context * mctx;
 };
 
+std::unique_ptr<llm_graph_input_dsv4> llm_graph_input_dsv4_create(
+        ggml_context * ctx,
+        const llama_hparams & hparams,
+        const llama_cparams & cparams,
+        const llama_ubatch & ubatch,
+        const llama_kv_cache_dsv4_context * mctx);
+
 class llm_graph_input_attn_cross : public llm_graph_input_i {
 public:
     llm_graph_input_attn_cross(const llama_cross * cross) : cross(cross) {}
@@ -814,6 +899,10 @@ struct llm_graph_params {
 
     std::map<llama_seq_id, llama_sampler *> samplers;
 
+    skippy_graph_build_inputs build_inputs;
+    std::vector<int32_t> activation_export_token_axes;
+    uint64_t computation_generation = 0;
+
     static bool samplers_equal(
           const std::map<llama_seq_id, llama_sampler *> & lhs,
           const std::map<llama_seq_id, llama_sampler *> & rhs) {
@@ -875,6 +964,11 @@ struct llm_graph_params {
             return false;
         }
 
+        if (!build_inputs.topology_equal(other.build_inputs) ||
+                activation_export_token_axes != other.activation_export_token_axes) {
+            return false;
+        }
+
         if (!samplers_equal(samplers, other.samplers)) {
             return false;
         }
@@ -903,6 +997,7 @@ struct llm_graph_params {
             cparams.embeddings_nextn        == other.cparams.embeddings_nextn        &&
             cparams.embeddings_nextn_masked == other.cparams.embeddings_nextn_masked &&
             cparams.causal_attn             == other.cparams.causal_attn             &&
+            computation_generation          == other.computation_generation          &&
             arch  == other.arch  &&
             gtype == other.gtype &&
             cvec  == other.cvec  &&
@@ -917,6 +1012,23 @@ struct llm_graph_fused_node {
     int il;
 };
 
+struct skippy_activation_port {
+    ggml_tensor * tensor = nullptr;
+    int32_t token_axis = -1;
+    bool optional = false;
+    std::string binding;
+    bool token_axis_explicit = false;
+};
+
+struct skippy_input_choice {
+    std::array<ggml_tensor *, 2> alternatives = {};
+    uint32_t selected = 0;
+};
+
+#ifdef LLAMA_STAGE_BUILD_TESTS
+bool skippy_scale_embedding_input_for_test(uint32_t input_mode, uint32_t n_deepstack_layers);
+#endif
+
 class llm_graph_result {
 public:
     llm_graph_result(int64_t max_nodes);
@@ -928,6 +1040,26 @@ public:
     ggml_tensor * get_embd()        const { return t_embd; }
     ggml_tensor * get_embd_pooled() const { return t_embd_pooled; }
     ggml_tensor * get_h_nextn()     const { return t_h_nextn; }
+    ggml_tensor * get_skippy_activation_input() const {
+        return activation_imports.empty() ? t_inp_embd : activation_imports.front().tensor;
+    }
+    ggml_tensor * get_skippy_activation_output() const {
+        return activation_exports.empty() ? t_embd : activation_exports.front().tensor;
+    }
+    const std::vector<skippy_activation_port> & get_skippy_activation_imports() const { return activation_imports; }
+    const std::vector<skippy_activation_port> & get_skippy_activation_exports() const { return activation_exports; }
+    void add_skippy_activation_import(
+            ggml_tensor * tensor, int32_t token_axis, bool optional = false, bool token_axis_explicit = false);
+    void add_skippy_activation_export(
+            ggml_tensor * tensor, int32_t token_axis, bool optional = false, bool token_axis_explicit = false);
+    void add_skippy_input_choice(
+            const std::array<ggml_tensor *, 2> & alternatives,
+            uint32_t selected);
+    void replace_with_stage_graph(
+            ggml_cgraph * graph,
+            std::vector<skippy_activation_port> imports,
+            std::vector<skippy_activation_port> exports,
+            std::vector<skippy_state_effect> effects);
 
     ggml_tensor * get_layer_inp(int il) const { return t_layer_inp[il]; }
 
@@ -937,6 +1069,8 @@ public:
     int64_t get_max_nodes() const;
 
     void reset();
+
+    void set_inputs(const llama_ubatch * ubatch, const skippy_graph_build_inputs & build_inputs);
 
     void set_inputs(const llama_ubatch * ubatch);
     void set_outputs(const llm_graph_params & params);
@@ -958,6 +1092,18 @@ public:
 
     const std::vector<llm_graph_fused_node> & get_fused_nodes() const { return fused_nodes; }
 
+    const std::vector<skippy_block_boundary> & get_block_boundaries() const { return block_boundaries; }
+
+    const std::vector<skippy_state_effect> & get_state_effects() const { return state_effects; }
+
+    const skippy_graph_build_inputs & get_build_inputs() const { return build_inputs; }
+
+    const std::vector<skippy_request_input_binding> & get_request_input_bindings() const { return request_input_bindings; }
+
+    const std::vector<skippy_input_choice> & get_skippy_input_choices() const { return input_choices; }
+
+    const llm_graph_params & get_params() const { return params; }
+
     void set_params(const llm_graph_params & params);
 
     // important graph nodes
@@ -967,6 +1113,8 @@ public:
     ggml_tensor * t_embd        = nullptr;
     ggml_tensor * t_embd_pooled = nullptr;
     ggml_tensor * t_h_nextn     = nullptr; // [n_embd, n_outputs] hidden state before final output norm
+    std::vector<skippy_activation_port> activation_imports;
+    std::vector<skippy_activation_port> activation_exports;
 
     std::vector<ggml_tensor *> t_layer_inp;
 
@@ -977,6 +1125,13 @@ public:
 
     std::vector<llm_graph_input_ptr> inputs;
     std::vector<llm_graph_fused_node> fused_nodes;
+    std::vector<skippy_block_boundary> block_boundaries;
+    std::vector<skippy_state_effect> state_effects;
+    std::vector<skippy_input_choice> input_choices;
+
+    skippy_graph_build_inputs build_inputs;
+    std::vector<skippy_request_input_binding> request_input_bindings;
+    std::map<std::string, uint32_t> request_input_ordinals;
 
     std::map<std::pair<const ggml_tensor *, const ggml_tensor *>, ggml_tensor *> hdmd_inputs;
 
@@ -1069,6 +1224,8 @@ struct llm_graph_context {
 
     const llm_graph_cb & cb_func;
 
+    const skippy_graph_build_inputs build_inputs;
+
     llm_graph_result * res;
 
     ggml_context * ctx0 = nullptr;
@@ -1089,6 +1246,28 @@ struct llm_graph_context {
         return inp_out_ids != nullptr && cparams.embeddings_nextn && !cparams.embeddings_nextn_masked;
     }
 
+    // register the canonical input/output boundary of one transformer or
+    // recurrent block; owned by the exact graph result, stage-independent
+    void begin_block(ggml_tensor * cur, int il) const;
+    void end_block(ggml_tensor * cur, int il) const;
+
+    // register a persistent-state read or ordered write established by a
+    // generic helper; owned by the exact graph result, stage-independent
+    void state_read(skippy_state_kind kind, ggml_tensor * storage, int il) const;
+    void state_write(skippy_state_kind kind, ggml_tensor * storage, ggml_tensor * effect_node, int il) const;
+    void request_input(ggml_tensor * tensor, const char * identity) const;
+    void request_inputs(llm_graph_input_attn_no_cache * input) const;
+    void request_inputs(llm_graph_input_attn_kv * input) const;
+    void request_inputs(llm_graph_input_attn_k * input) const;
+    void request_inputs(llm_graph_input_attn_kv_iswa * input) const;
+    void request_inputs(llm_graph_input_attn_k_iswa * input) const;
+    void request_inputs(llm_graph_input_attn_k_dsa * input) const;
+    void request_inputs(llm_graph_input_attn_k_dsa_iswa * input) const;
+    void request_inputs(llm_graph_input_attn_kv_msa * input) const;
+    void request_inputs(llm_graph_input_mem_hybrid_iswa * input) const;
+    void request_inputs(llm_graph_input_rs * input) const;
+    void request_inputs(llm_graph_input_dsv4 * input) const;
+
     //
     // common
     //
@@ -1106,7 +1285,8 @@ struct llm_graph_context {
     ggml_tensor * build_lora_mm(
               ggml_tensor * w,
               ggml_tensor * cur,
-              ggml_tensor * w_s = nullptr) const;
+              ggml_tensor * w_s = nullptr,
+            enum ggml_prec   prec = GGML_PREC_DEFAULT) const;
 
     // do mat_mul_id, while optionally apply lora and per-expert scale
     // if slots is set, the experts are read from the MoE cache at these slots (see build_moe_cache_slots)
@@ -1226,7 +1406,8 @@ struct llm_graph_context {
     //
 
     // tok_scale: applied to token rows only
-    ggml_tensor * build_inp_embd(ggml_tensor * tok_embd, float tok_scale = 1.0f) const;
+    // allow_embeddings: false when the model metadata forbids raw embedding input
+    ggml_tensor * build_inp_embd(ggml_tensor * tok_embd, float tok_scale = 1.0f, bool allow_embeddings = true) const;
     ggml_tensor * build_inp_pos() const;
     ggml_tensor * build_inp_attn_scale() const;
     ggml_tensor * build_inp_out_ids() const;
@@ -1397,6 +1578,19 @@ struct llm_graph_context {
                 int32_t   rs_zero,
             const llm_graph_get_rows_fn & get_state_rows = nullptr) const;
 
+    ggml_tensor * build_rs_impl(
+            ggml_tensor * s,
+            ggml_tensor * state_copy,
+            ggml_tensor * state_copy_main,
+                int32_t   state_size,
+                int32_t   n_seqs,
+               uint32_t   n_rs,
+               uint32_t   rs_head,
+               uint32_t   rs_size,
+                int32_t   rs_zero,
+            const llm_graph_get_rows_fn & get_state_rows,
+            const skippy_state_kind * kind, int il) const;
+
     llm_graph_input_rs * build_rs_inp() const;
 
     ggml_tensor * build_rs(
@@ -1405,6 +1599,15 @@ struct llm_graph_context {
                 int32_t   state_size,
                 int32_t   n_seqs,
             const llm_graph_get_rows_fn & get_state_rows = nullptr) const;
+
+    /** Prepare state and register its read owner and ordered zero/copy writes. */
+    ggml_tensor * build_rs(
+            llm_graph_input_rs * inp,
+            ggml_tensor * s,
+                int32_t   state_size,
+                int32_t   n_seqs,
+            skippy_state_kind kind, int il,
+            const llm_graph_get_rows_fn & get_state_rows = ggml_get_rows) const;
 
     ggml_tensor * build_rwkv_token_shift_load(
         llm_graph_input_rs * inp,

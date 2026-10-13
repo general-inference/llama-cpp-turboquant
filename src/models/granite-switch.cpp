@@ -22,8 +22,14 @@ void llama_model_granite_switch::load_arch_hparams(llama_model_loader & ml) {
 
     ml.get_key(LLM_KV_EXPERT_SHARED_FEED_FORWARD_LENGTH, hparams.n_ff_shexp, /* required */ false);
 
-    ml.get_key(LLM_KV_ADAPTER_COUNT,     n_adapters);
-    ml.get_key(LLM_KV_ADAPTER_LORA_RANK, max_lora_rank);
+    // Early granite-switch conversions name the adapter metadata without the
+    // "adapters." grouping; accept both spellings.
+    if (!ml.get_key(LLM_KV_ADAPTER_COUNT, n_adapters, /* required */ false)) {
+        ml.get_key("graniteswitch.num_adapters", n_adapters);
+    }
+    if (!ml.get_key(LLM_KV_ADAPTER_LORA_RANK, max_lora_rank, /* required */ false)) {
+        ml.get_key("graniteswitch.max_lora_rank", max_lora_rank);
+    }
     ml.get_key(LLM_KV_ADAPTER_ROUTER_GAIN, router_gain, /* required */ false);
 
     // bound counts that size tensors
@@ -36,8 +42,12 @@ void llama_model_granite_switch::load_arch_hparams(llama_model_loader & ml) {
 
     std::vector<llama_token> token_ids;
     std::vector<llama_token> substitute_ids;
-    ml.get_arr(LLM_KV_ADAPTER_TOKEN_IDS_ACTIVATE,   token_ids);
-    ml.get_arr(LLM_KV_ADAPTER_TOKEN_IDS_SUBSTITUTE, substitute_ids);
+    if (!ml.get_arr(LLM_KV_ADAPTER_TOKEN_IDS_ACTIVATE,   token_ids, /* required */ false)) {
+        ml.get_arr("graniteswitch.adapter_token_ids", token_ids);
+    }
+    if (!ml.get_arr(LLM_KV_ADAPTER_TOKEN_IDS_SUBSTITUTE, substitute_ids, /* required */ false)) {
+        ml.get_arr("graniteswitch.adapter_substitute_token_ids", substitute_ids);
+    }
 
     if (token_ids.size() != n_adapters || substitute_ids.size() != n_adapters) {
         throw std::runtime_error(format(
@@ -112,12 +122,12 @@ void llama_model_granite_switch::load_arch_tensors(llama_model_loader &) {
 
         auto & sl = layer.switch_lora;
 
-        sl.a_q = create_tensor(tn(LLM_TENSOR_ATTN_Q, "lora_a", i), {n_embd,  n_rank, n_slots}, 0);
-        sl.b_q = create_tensor(tn(LLM_TENSOR_ATTN_Q, "lora_b", i), {n_rank, n_embd_q, n_slots}, 0);
-        sl.a_k = create_tensor(tn(LLM_TENSOR_ATTN_K, "lora_a", i), {n_embd,  n_rank, n_slots}, 0);
-        sl.b_k = create_tensor(tn(LLM_TENSOR_ATTN_K, "lora_b", i), {n_rank, n_embd_kv, n_slots}, 0);
-        sl.a_v = create_tensor(tn(LLM_TENSOR_ATTN_V, "lora_a", i), {n_embd,  n_rank, n_slots}, 0);
-        sl.b_v = create_tensor(tn(LLM_TENSOR_ATTN_V, "lora_b", i), {n_rank, n_embd_kv, n_slots}, 0);
+        sl.a_q = create_tensor(tn(LLM_TENSOR_ATTN_QKV, "lora_a_q", i), {n_embd,  n_rank, n_slots}, 0);
+        sl.b_q = create_tensor(tn(LLM_TENSOR_ATTN_QKV, "lora_b_q", i), {n_rank, n_embd_q, n_slots}, 0);
+        sl.a_k = create_tensor(tn(LLM_TENSOR_ATTN_QKV, "lora_a_k", i), {n_embd,  n_rank, n_slots}, 0);
+        sl.b_k = create_tensor(tn(LLM_TENSOR_ATTN_QKV, "lora_b_k", i), {n_rank, n_embd_kv, n_slots}, 0);
+        sl.a_v = create_tensor(tn(LLM_TENSOR_ATTN_QKV, "lora_a_v", i), {n_embd,  n_rank, n_slots}, 0);
+        sl.b_v = create_tensor(tn(LLM_TENSOR_ATTN_QKV, "lora_b_v", i), {n_rank, n_embd_kv, n_slots}, 0);
 
         sl.a_o = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "lora_a", i), {n_embd_q, n_rank, n_slots}, 0);
         sl.b_o = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "lora_b", i), {n_rank,   n_embd, n_slots}, 0);
@@ -179,10 +189,18 @@ void llm_graph_input_switch::set_input(const llama_ubatch * ubatch) {
             : (int32_t) tok;
     }
 
-    ggml_backend_tensor_set(sub_tokens,  sub.data(),  0, n_tokens*ggml_element_size(sub_tokens));
-    ggml_backend_tensor_set(router_ksig, ksig.data(), 0, n_tokens*ggml_element_size(router_ksig));
-    ggml_backend_tensor_set(router_vval, vval.data(), 0, n_tokens*ggml_element_size(router_vval));
-    ggml_backend_tensor_set(router_q,    q.data(),    0, n_tokens*ggml_element_size(router_q));
+    if (sub_tokens != nullptr && sub_tokens->buffer != nullptr) {
+        ggml_backend_tensor_set(sub_tokens, sub.data(), 0, n_tokens*ggml_element_size(sub_tokens));
+    }
+    if (router_ksig != nullptr && router_ksig->buffer != nullptr) {
+        ggml_backend_tensor_set(router_ksig, ksig.data(), 0, n_tokens*ggml_element_size(router_ksig));
+    }
+    if (router_vval != nullptr && router_vval->buffer != nullptr) {
+        ggml_backend_tensor_set(router_vval, vval.data(), 0, n_tokens*ggml_element_size(router_vval));
+    }
+    if (router_q != nullptr && router_q->buffer != nullptr) {
+        ggml_backend_tensor_set(router_q, q.data(), 0, n_tokens*ggml_element_size(router_q));
+    }
 }
 
 std::unique_ptr<llm_graph_context> llama_model_granite_switch::build_arch_graph(const llm_graph_params & params) const {
@@ -226,7 +244,8 @@ llama_model_granite_switch::graph::graph(
 
     const auto & smodel = static_cast<const llama_model_granite_switch &>(model);
 
-    // TODO: support raw embedding input (multimodal / pre-embedded tokens) when needed
+    // The canonical graph is always built from the ordinary token batch. The
+    // stage realizer preserves these router tensors as explicit request inputs.
     ASSERT_EMBD_OR_TOKEN(ubatch);
     GGML_ASSERT(ubatch.token && "granite-switch requires token input");
 
@@ -247,6 +266,10 @@ llama_model_granite_switch::graph::graph(
     ggml_tensor * router_ksig = inp_switch->router_ksig;
     ggml_tensor * router_vval = inp_switch->router_vval;
     ggml_tensor * router_q    = inp_switch->router_q;
+    request_input(sub_tokens,  "granite_switch.substituted_tokens");
+    request_input(router_ksig, "granite_switch.router_key_signal");
+    request_input(router_vval, "granite_switch.router_value");
+    request_input(router_q,    "granite_switch.router_query");
     res->add_input(std::move(inp_switch));
 
     // embed the substituted ids directly; build_inp_embd would embed the raw tokens

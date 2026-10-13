@@ -108,8 +108,9 @@ void llama_model_gemma4::load_arch_tensors(llama_model_loader &) {
         layer.ffn_post_norm = create_tensor(tn(LLM_TENSOR_FFN_POST_NORM, "weight", i), {n_embd}, 0);
 
         // MoE router
+        const std::string ffn_gate_inp_name = tn(LLM_TENSOR_FFN_GATE_INP, "weight", i).str();
         layer.ffn_gate_inp = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP, "weight", i), {n_embd, n_expert}, TENSOR_NOT_REQUIRED);
-        bool has_expert = layer.ffn_gate_inp != nullptr;
+        bool has_expert = layer.ffn_gate_inp != nullptr || ml->get_tensor_meta(ffn_gate_inp_name.c_str()) != nullptr;
 
         // norm
         if (has_expert) {
@@ -486,6 +487,7 @@ ggml_tensor * llama_model_gemma4::graph::build_inp_per_layer() {
     if (ubatch.token) {
         inp->tokens = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, ubatch.n_tokens);
         ggml_set_input(inp->tokens);
+        request_input(inp->tokens, "tokens.per_layer");
         res->t_inp_tokens = inp->tokens;
 
         inp_per_layer = ggml_get_rows(ctx0, model.per_layer_tok_embd, inp->tokens);
@@ -497,6 +499,7 @@ ggml_tensor * llama_model_gemma4::graph::build_inp_per_layer() {
         // [TAG_GEMMA4_IMG_PADDING]
         inp->token0 = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, 1);
         ggml_set_input(inp->token0);
+        request_input(inp->token0, "tokens.per_layer.padding");
         res->t_inp_tokens = inp->token0;
 
         inp_per_layer = ggml_get_rows(ctx0, model.per_layer_tok_embd, inp->token0);

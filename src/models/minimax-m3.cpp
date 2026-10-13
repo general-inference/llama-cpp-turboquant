@@ -18,11 +18,13 @@ void llama_model_minimax_m3::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_EXPERT_WEIGHTS_SCALE,        hparams.expert_weights_scale, false);
     ml.get_key(LLM_KV_EXPERT_WEIGHTS_NORM,         hparams.expert_weights_norm, false);
     ml.get_key(LLM_KV_EXPERT_GATING_FUNC,          hparams.expert_gating_func);
-    ml.get_key(LLM_KV_ATTENTION_INDEXER_HEAD_COUNT,    hparams.indexer_n_head);
-    ml.get_key(LLM_KV_ATTENTION_INDEXER_KEY_LENGTH,    hparams.indexer_head_size);
-    ml.get_key(LLM_KV_ATTENTION_INDEXER_TOP_K,         hparams.indexer_top_k);
-    ml.get_key(LLM_KV_ATTENTION_INDEXER_BLOCK_SIZE,    hparams.indexer_block_size);
-    ml.get_key(LLM_KV_ATTENTION_INDEXER_LOCAL_BLOCKS,  hparams.indexer_local_blocks);
+    // The pinned M3 conversion carries no indexer metadata or weights; MSA
+    // then stays disabled and attention runs dense (same fallback as no-FA).
+    ml.get_key(LLM_KV_ATTENTION_INDEXER_HEAD_COUNT,    hparams.indexer_n_head,    false);
+    ml.get_key(LLM_KV_ATTENTION_INDEXER_KEY_LENGTH,    hparams.indexer_head_size, false);
+    ml.get_key(LLM_KV_ATTENTION_INDEXER_TOP_K,         hparams.indexer_top_k,     false);
+    ml.get_key(LLM_KV_ATTENTION_INDEXER_BLOCK_SIZE,    hparams.indexer_block_size, false);
+    ml.get_key(LLM_KV_ATTENTION_INDEXER_LOCAL_BLOCKS,  hparams.indexer_local_blocks, false);
 
     msa_p = {
         /*.blk          =*/ (int) hparams.indexer_block_size,
@@ -30,7 +32,18 @@ void llama_model_minimax_m3::load_arch_hparams(llama_model_loader & ml) {
         /*.local        =*/ (int) hparams.indexer_local_blocks,
     };
 
-    GGML_ASSERT(hparams.indexer_block_size > 0); // avoid div by zero
+    const bool indexer_present = hparams.indexer_n_head > 0 && hparams.indexer_head_size > 0 &&
+        hparams.indexer_top_k > 0 && hparams.indexer_block_size > 0 && hparams.indexer_local_blocks > 0;
+    if (!indexer_present) {
+        hparams.indexer_n_head = 0;
+        hparams.indexer_head_size = 0;
+        hparams.indexer_top_k = 0;
+        hparams.indexer_block_size = 0;
+        hparams.indexer_local_blocks = 0;
+        msa_p = {0, 0, 0};
+    } else {
+        GGML_ASSERT(hparams.indexer_block_size > 0); // avoid div by zero
+    }
 
     switch (hparams.n_layer()) {
         case 60: type = LLM_TYPE_428B_A23B; break;
@@ -81,10 +94,12 @@ void llama_model_minimax_m3::load_arch_tensors(llama_model_loader &) {
             layer.ffn_up_shexp   = create_tensor(tn(LLM_TENSOR_FFN_UP_SHEXP,   "weight", i), {n_embd, n_ff_exp * n_expert_shared}, 0);
 
             // indexer
-            layer.index_q_proj = create_tensor(tn(LLM_TENSOR_INDEXER_Q_PROJ, "weight", i), {n_embd, hparams.indexer_n_head * hparams.indexer_head_size}, 0);
-            layer.index_k_proj = create_tensor(tn(LLM_TENSOR_INDEXER_K_PROJ, "weight", i), {n_embd, hparams.indexer_head_size}, 0);
-            layer.index_q_norm = create_tensor(tn(LLM_TENSOR_INDEXER_Q_NORM, "weight", i), {hparams.indexer_head_size}, 0);
-            layer.index_k_norm = create_tensor(tn(LLM_TENSOR_INDEXER_K_NORM, "weight", i), {hparams.indexer_head_size}, 0);
+            const int indexer_flags = hparams.indexer_n_head > 0 && hparams.indexer_head_size > 0
+                    ? 0 : TENSOR_NOT_REQUIRED;
+            layer.index_q_proj = create_tensor(tn(LLM_TENSOR_INDEXER_Q_PROJ, "weight", i), {n_embd, hparams.indexer_n_head * hparams.indexer_head_size}, indexer_flags);
+            layer.index_k_proj = create_tensor(tn(LLM_TENSOR_INDEXER_K_PROJ, "weight", i), {n_embd, hparams.indexer_head_size}, indexer_flags);
+            layer.index_q_norm = create_tensor(tn(LLM_TENSOR_INDEXER_Q_NORM, "weight", i), {hparams.indexer_head_size}, indexer_flags);
+            layer.index_k_norm = create_tensor(tn(LLM_TENSOR_INDEXER_K_NORM, "weight", i), {hparams.indexer_head_size}, indexer_flags);
         }
     }
 }
@@ -230,9 +245,10 @@ llama_model_minimax_m3::graph::graph(const llama_model & model, const llm_graph_
     // caches either a single sequence, or multiple sequences with kv_unified == false (each
     // stream then has its own slot space). A unified cache with multiple sequences
     // interleaves slots and would silently break block anchoring so it falls back to dense.
-    const bool fa_on       = cparams.flash_attn;
-    const bool streams_ok  = cparams.n_seq_max == 1 || !cparams.kv_unified;
-    const bool msa_enabled = fa_on && streams_ok;
+    const bool fa_on        = cparams.flash_attn;
+    const bool streams_ok   = cparams.n_seq_max == 1 || !cparams.kv_unified;
+    const bool indexer_ok   = hparams.indexer_n_head > 0 && hparams.indexer_head_size > 0;
+    const bool msa_enabled  = fa_on && streams_ok && indexer_ok;
 
     auto * inp_attn = build_attn_inp_kv_msa(msa_enabled);
 
@@ -278,19 +294,24 @@ llama_model_minimax_m3::graph::graph(const llama_model & model, const llm_graph_
 
         inp->bias = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, nblk, n_tokens);  // stream-grouped tokens
         ggml_set_input(inp->bias);
+        request_input(inp->bias, "attention.msa.local_bias");
 
         inp->pos_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_ps, n_tokens);
         ggml_set_input(inp->pos_mask);
+        request_input(inp->pos_mask, "attention.msa.position_mask");
 
         inp->pos_slot_i = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, n_ps, ns);
         ggml_set_input(inp->pos_slot_i);
+        request_input(inp->pos_slot_i, "attention.msa.position_to_cell_indices");
 
         if (msa_decode) {
             inp->pos_slot_f = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_ps, ns);
             ggml_set_input(inp->pos_slot_f);
+            request_input(inp->pos_slot_f, "attention.msa.position_to_cell_values");
         } else {
             inp->cell_blk = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, n_kv, ns);
             ggml_set_input(inp->cell_blk);
+            request_input(inp->cell_blk, "attention.msa.cell_blocks");
 
             msa_mf = ggml_cast(ctx0, msa_kqm, GGML_TYPE_F32);
         }

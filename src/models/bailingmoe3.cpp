@@ -256,7 +256,7 @@ llama_model_bailingmoe3::graph::graph(const llama_model & model, const llm_graph
             const auto cache_head = mctx_cur->get_head();
             const auto mem_size = mctx_cur->get_size();
             ggml_tensor * conv_states_all = mctx_cur->get_r_l(il);
-            ggml_tensor * conv_state_all = build_rs(inp_rs, conv_states_all, hparams.n_embd_r(), n_seqs);
+            ggml_tensor * conv_state_all = build_rs(inp_rs, conv_states_all, hparams.n_embd_r(), n_seqs, skippy_state_kind::recurrent_conv, il);
 
             ggml_tensor * q = bailingmoe3_causal_conv1d(
                     gf, ctx0, conv_states_all, conv_state_all, 0, cur, layer.wq, layer.ssm_q_conv,
@@ -283,7 +283,7 @@ llama_model_bailingmoe3::graph::graph(const llama_model & model, const llm_graph
             k = build_gdn_l2_norm(ctx0, k, hparams.f_norm_rms_eps);
 
             ggml_tensor * states_all = mctx_cur->get_s_l(il);
-            ggml_tensor * state = build_rs(inp_rs, states_all, hparams.n_embd_s(), n_seqs);
+            ggml_tensor * state = build_rs(inp_rs, states_all, hparams.n_embd_s(), n_seqs, skippy_state_kind::recurrent_ssm, il);
             state = ggml_reshape_4d(ctx0, state, head_dim, head_dim, n_head, n_seqs);
 
             ggml_tensor * out = ggml_cont(ctx0, build_recurrent_attn(
@@ -353,7 +353,8 @@ llama_model_bailingmoe3::graph::graph(const llama_model & model, const llm_graph
             attn_gate = ggml_sigmoid(ctx0, ggml_reshape_3d(ctx0, attn_gate, 1, n_head, n_tokens));
             cur = ggml_reshape_3d(ctx0, cur, v_head_dim, n_head, n_tokens);
             cur = ggml_mul(ctx0, cur, attn_gate);
-            cur = ggml_mul_mat(ctx0, layer.wo, ggml_cont_2d(ctx0, cur, v_head_dim * n_head, n_tokens));
+            cur = ggml_cont_2d(ctx0, cur, v_head_dim * n_head, n_tokens);
+            cur = ggml_mul_mat(ctx0, layer.wo, cur);
             cb(cur, "mla_out", il);
         }
 
@@ -521,7 +522,8 @@ llama_model_bailingmoe3::graph_mtp::graph_mtp(const llama_model & model, const l
     attn_gate = ggml_sigmoid(ctx0, ggml_reshape_3d(ctx0, attn_gate, 1, n_head, n_tokens));
     cur = ggml_reshape_3d(ctx0, cur, v_head_dim, n_head, n_tokens);
     cur = ggml_mul(ctx0, cur, attn_gate);
-    cur = ggml_mul_mat(ctx0, layer.wo, ggml_cont_2d(ctx0, cur, v_head_dim * n_head, n_tokens));
+    cur = ggml_cont_2d(ctx0, cur, v_head_dim * n_head, n_tokens);
+            cur = ggml_mul_mat(ctx0, layer.wo, cur);
 
     ggml_tensor * ffn_inp = ggml_add(ctx0, cur, inpSA);
     cur = build_norm(ffn_inp, layer.ffn_norm, nullptr, LLM_NORM_RMS, il);
