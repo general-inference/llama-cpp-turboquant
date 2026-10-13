@@ -1,0 +1,363 @@
+#include "chat.h"
+#include "skippy.h"
+
+#include "json.h"
+
+#include <cstdlib>
+#include <cstring>
+#include <exception>
+#include <limits>
+#include <string>
+#include <vector>
+
+using json = common_json;
+
+using skippy_chat_templates_create_fn = void * (*)(const llama_model * model);
+using skippy_chat_templates_free_fn = void (*)(void * templates);
+
+extern "C" LLAMA_API void * skippy_model_chat_templates_get_or_init(
+        struct skippy_model * model,
+        skippy_chat_templates_create_fn create,
+        skippy_chat_templates_free_fn free_templates);
+extern "C" LLAMA_API void skippy_model_chat_templates_lock(struct skippy_model * model);
+extern "C" LLAMA_API void skippy_model_chat_templates_unlock(struct skippy_model * model);
+
+class skippy_chat_templates_lock_guard {
+public:
+    explicit skippy_chat_templates_lock_guard(skippy_model * model) : model(model) {
+        skippy_model_chat_templates_lock(model);
+    }
+
+    ~skippy_chat_templates_lock_guard() {
+        skippy_model_chat_templates_unlock(model);
+    }
+
+private:
+    skippy_model * model;
+};
+
+static void * skippy_common_chat_templates_create(const llama_model * model) {
+    return common_chat_templates_init(model, "").release();
+}
+
+static void skippy_common_chat_templates_free(void * templates) {
+    common_chat_templates_free(static_cast<common_chat_templates *>(templates));
+}
+
+static skippy_error * skippy_common_make_error(enum skippy_status status, const char * message) {
+    skippy_error * error = new skippy_error{};
+    error->status = status;
+
+    if (message == nullptr) {
+        error->message = nullptr;
+        return error;
+    }
+
+    const size_t len = std::strlen(message);
+    char * owned = static_cast<char *>(std::malloc(len + 1));
+    if (owned == nullptr) {
+        error->status = SKIPPY_STATUS_ERROR;
+        error->message = nullptr;
+        return error;
+    }
+
+    std::memcpy(owned, message, len + 1);
+    error->message = owned;
+    return error;
+}
+
+static void skippy_common_set_error(
+        skippy_error ** out_error,
+        enum skippy_status status,
+        const char * message) {
+    if (out_error != nullptr) {
+        *out_error = skippy_common_make_error(status, message);
+    }
+}
+
+static enum skippy_status skippy_common_success(skippy_error ** out_error) {
+    if (out_error != nullptr) {
+        *out_error = nullptr;
+    }
+    return SKIPPY_STATUS_OK;
+}
+
+static bool skippy_common_buffer_too_small(
+        const std::string & value,
+        char * output,
+        size_t output_capacity,
+        size_t * out_bytes) {
+    if (out_bytes != nullptr) {
+        *out_bytes = value.size();
+    }
+    return output == nullptr || output_capacity < value.size();
+}
+
+static void skippy_common_copy_output(const std::string & value, char * output) {
+    if (!value.empty()) {
+        std::memcpy(output, value.data(), value.size());
+    }
+}
+
+static json skippy_common_parse_json_or_null(const char * value) {
+    if (value == nullptr || value[0] == '\0') {
+        return json();
+    }
+    return json::parse(value);
+}
+
+static std::string skippy_common_tool_choice_string(const char * tool_choice_json) {
+    json value = skippy_common_parse_json_or_null(tool_choice_json);
+    if (value.is_null()) {
+        return "auto";
+    }
+    if (value.is_string()) {
+        return value.get<std::string>();
+    }
+    if (value.is_object()) {
+        const std::string type = value.value("type", std::string("auto"));
+        if (type == "function" || type == "tool") {
+            return "required";
+        }
+        if (type == "any") {
+            return "required";
+        }
+        if (type == "auto" || type == "none" || type == "required") {
+            return type;
+        }
+    }
+    throw std::invalid_argument("Invalid tool_choice: " + value.dump());
+}
+
+static json skippy_common_grammar_triggers_to_json(const std::vector<common_grammar_trigger> & triggers) {
+    json out = json::array();
+    for (const auto & trigger : triggers) {
+        json item = {
+            {"type", static_cast<int>(trigger.type)},
+            {"value", trigger.value},
+        };
+        if (trigger.type == COMMON_GRAMMAR_TRIGGER_TYPE_TOKEN) {
+            item["token"] = static_cast<int>(trigger.token);
+        }
+        out.push_back(std::move(item));
+    }
+    return out;
+}
+
+static json skippy_common_chat_metadata_json(
+        const common_chat_params & params,
+        common_reasoning_format reasoning_format,
+        bool parse_tool_calls,
+        bool skip_chat_parsing) {
+    return {
+        {"chat_format", static_cast<int>(params.format)},
+        {"reasoning_format", common_reasoning_format_name(reasoning_format)},
+        {"generation_prompt", params.generation_prompt},
+        {"supports_thinking", params.supports_thinking},
+        {"thinking_start_tag", params.thinking_start_tag},
+        {"thinking_end_tags", params.thinking_end_tags},
+        {"parse_tool_calls", parse_tool_calls},
+        {"chat_parser", params.parser.save()},
+        {"grammar", params.grammar},
+        {"grammar_lazy", params.grammar_lazy},
+        {"grammar_triggers", skippy_common_grammar_triggers_to_json(params.grammar_triggers)},
+        {"preserved_tokens", params.preserved_tokens},
+        {"additional_stops", params.additional_stops},
+        {"skip_chat_parsing", skip_chat_parsing},
+    };
+}
+
+extern "C" SKIPPY_COMMON_API enum skippy_status skippy_apply_chat_template_json(
+        struct skippy_model * model,
+        const char * messages_json,
+        const char * tools_json,
+        const char * tool_choice_json,
+        bool add_assistant,
+        bool override_enable_thinking,
+        bool enable_thinking,
+        bool parallel_tool_calls,
+        const char * reasoning_format_name,
+        const char * chat_template_kwargs_json,
+        const char * chat_template,
+        bool use_jinja,
+        const char * grammar,
+        const char * json_schema,
+        bool skip_chat_parsing,
+        char * output_text,
+        size_t output_text_capacity,
+        size_t * out_text_bytes,
+        char * output_metadata_json,
+        size_t output_metadata_json_capacity,
+        size_t * out_metadata_json_bytes,
+        struct skippy_error ** out_error) {
+    if (messages_json == nullptr) {
+        skippy_common_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "messages_json is required");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+    if (out_text_bytes == nullptr || out_metadata_json_bytes == nullptr) {
+        skippy_common_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "output byte counters are required");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+    if (output_text_capacity > static_cast<size_t>(std::numeric_limits<int32_t>::max()) ||
+        output_metadata_json_capacity > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+        skippy_common_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "chat template output capacity exceeds int32_t range");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+    const llama_model * native_model = skippy_model_native_model(model);
+    if (native_model == nullptr) {
+        skippy_common_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "model is required");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+
+    std::string prompt;
+    std::string metadata;
+    try {
+        json messages = json::parse(messages_json);
+        json tools = skippy_common_parse_json_or_null(tools_json);
+
+        common_chat_templates_inputs inputs;
+        inputs.messages              = common_chat_msgs_parse_oaicompat(messages);
+        inputs.tools                 = common_chat_tools_parse_oaicompat(tools);
+        inputs.tool_choice           = common_chat_tool_choice_parse_oaicompat(skippy_common_tool_choice_string(tool_choice_json));
+        inputs.add_generation_prompt = add_assistant;
+        inputs.use_jinja             = use_jinja;
+        inputs.parallel_tool_calls   = parallel_tool_calls;
+        if (override_enable_thinking) {
+            const char * value = enable_thinking ? "true" : "false";
+            inputs.enable_thinking = enable_thinking;
+            inputs.chat_template_kwargs["enable_thinking"] = value;
+            inputs.chat_template_kwargs["enableThinking"] = value;
+            inputs.chat_template_kwargs["enable_reasoning"] = value;
+            inputs.chat_template_kwargs["use_reasoning"] = value;
+            inputs.chat_template_kwargs["reasoning_enabled"] = value;
+            inputs.chat_template_kwargs["use_thinking"] = value;
+            inputs.chat_template_kwargs["thinking_enabled"] = value;
+            inputs.chat_template_kwargs["enable_think"] = value;
+            inputs.chat_template_kwargs["think_enabled"] = value;
+            if (!enable_thinking) {
+                inputs.chat_template_kwargs["reasoning_effort"] = R"("none")";
+            }
+        }
+        if (reasoning_format_name != nullptr && reasoning_format_name[0] != '\0') {
+            inputs.reasoning_format = common_reasoning_format_from_name(reasoning_format_name);
+        }
+        if (json_schema != nullptr && json_schema[0] != '\0') {
+            inputs.json_schema = json_schema;
+        }
+        json chat_template_kwargs = skippy_common_parse_json_or_null(chat_template_kwargs_json);
+        if (!chat_template_kwargs.is_null()) {
+            if (!chat_template_kwargs.is_object()) {
+                throw std::runtime_error("chat_template_kwargs must be a JSON object");
+            }
+            for (const auto & [key, value] : chat_template_kwargs.items()) {
+                inputs.chat_template_kwargs[key] = value.dump();
+            }
+        }
+        // Use the canonical off effort. Numeric zero is rejected by string-only
+        // templates or bypasses their aliases and leaves the default enabled.
+        // Native capability normalization supplies numeric aliases when needed.
+        if (override_enable_thinking && !enable_thinking) {
+            inputs.chat_template_kwargs["reasoning_effort"] = R"("none")";
+        }
+
+        common_chat_templates_ptr custom_tmpls;
+        common_chat_templates * tmpls = nullptr;
+        if (chat_template != nullptr && chat_template[0] != '\0') {
+            custom_tmpls = common_chat_templates_init(native_model, chat_template);
+            tmpls = custom_tmpls.get();
+        } else {
+            tmpls = static_cast<common_chat_templates *>(
+                    skippy_model_chat_templates_get_or_init(
+                        model,
+                        skippy_common_chat_templates_create,
+                        skippy_common_chat_templates_free));
+        }
+        if (tmpls == nullptr) {
+            throw std::runtime_error("failed to initialize model chat templates");
+        }
+        skippy_chat_templates_lock_guard templates_lock(model);
+        common_chat_params params = common_chat_templates_apply(tmpls, inputs);
+        if (grammar != nullptr && grammar[0] != '\0') {
+            params.grammar = grammar;
+            params.grammar_lazy = false;
+            params.grammar_triggers.clear();
+        }
+        prompt = params.prompt.str();
+
+        const bool parse_tool_calls = !inputs.tools.empty() && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE;
+        metadata = skippy_common_chat_metadata_json(
+                params,
+                inputs.reasoning_format,
+                parse_tool_calls,
+                skip_chat_parsing).dump();
+    } catch (const std::exception & e) {
+        skippy_common_set_error(out_error, SKIPPY_STATUS_UNSUPPORTED,
+            ("failed to apply chat template: " + std::string(e.what())).c_str());
+        return SKIPPY_STATUS_UNSUPPORTED;
+    } catch (...) {
+        skippy_common_set_error(out_error, SKIPPY_STATUS_UNSUPPORTED, "failed to apply chat template");
+        return SKIPPY_STATUS_UNSUPPORTED;
+    }
+
+    const bool prompt_too_small = skippy_common_buffer_too_small(prompt, output_text, output_text_capacity, out_text_bytes);
+    const bool metadata_too_small = skippy_common_buffer_too_small(metadata, output_metadata_json, output_metadata_json_capacity, out_metadata_json_bytes);
+    if (prompt_too_small || metadata_too_small) {
+        skippy_common_set_error(out_error, SKIPPY_STATUS_BUFFER_TOO_SMALL, "chat template output buffer is too small");
+        return SKIPPY_STATUS_BUFFER_TOO_SMALL;
+    }
+
+    skippy_common_copy_output(prompt, output_text);
+    skippy_common_copy_output(metadata, output_metadata_json);
+    return skippy_common_success(out_error);
+}
+
+extern "C" SKIPPY_COMMON_API enum skippy_status skippy_parse_chat_response_json(
+        const char * generated_text,
+        const char * metadata_json,
+        bool is_partial,
+        char * output_message_json,
+        size_t output_message_json_capacity,
+        size_t * out_message_json_bytes,
+        struct skippy_error ** out_error) {
+    if (generated_text == nullptr || metadata_json == nullptr) {
+        skippy_common_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "generated_text and metadata_json are required");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+    if (out_message_json_bytes == nullptr) {
+        skippy_common_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "out_message_json_bytes is required");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+    if (output_message_json_capacity > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+        skippy_common_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "parse output capacity exceeds int32_t range");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+
+    std::string output;
+    try {
+        json metadata = json::parse(metadata_json);
+        common_chat_parser_params params;
+        params.format = static_cast<common_chat_format>(metadata.value("chat_format", 0));
+        params.generation_prompt = common_chat_input(metadata.value("generation_prompt", std::string()));
+        const std::string parser = metadata.value("chat_parser", std::string());
+        if (!parser.empty()) {
+            params.parser.load(parser);
+        }
+
+        common_chat_msg msg = common_chat_parse(common_chat_input(generated_text), is_partial, params);
+        output = common_chat_msgs_to_json_oaicompat({ msg }).at(0).dump();
+    } catch (const std::exception & e) {
+        skippy_common_set_error(out_error, SKIPPY_STATUS_UNSUPPORTED,
+            ("failed to parse chat response: " + std::string(e.what())).c_str());
+        return SKIPPY_STATUS_UNSUPPORTED;
+    } catch (...) {
+        skippy_common_set_error(out_error, SKIPPY_STATUS_UNSUPPORTED, "failed to parse chat response");
+        return SKIPPY_STATUS_UNSUPPORTED;
+    }
+
+    if (skippy_common_buffer_too_small(output, output_message_json, output_message_json_capacity, out_message_json_bytes)) {
+        skippy_common_set_error(out_error, SKIPPY_STATUS_BUFFER_TOO_SMALL, "parse output buffer is too small");
+        return SKIPPY_STATUS_BUFFER_TOO_SMALL;
+    }
+    skippy_common_copy_output(output, output_message_json);
+    return skippy_common_success(out_error);
+}

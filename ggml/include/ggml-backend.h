@@ -226,6 +226,33 @@ extern "C" {
     };
     typedef struct ggml_backend_feature * (*ggml_backend_get_features_t)(ggml_backend_reg_t reg);
 
+    // Optional backend entry point for decoding validated CacheGen tiles
+    // directly into resident tensors. Callers resolve
+    // `ggml_backend_cachegen_decode` through get_proc_address.
+    struct ggml_backend_cachegen_tile {
+        const void * payload;
+        size_t payload_bytes;
+        uint32_t token_offset;
+        uint32_t token_count;
+    };
+
+    struct ggml_backend_cachegen_job {
+        struct ggml_tensor * dst;
+        const struct ggml_backend_cachegen_tile * tiles;
+        size_t tile_count;
+        const uint32_t * cells;
+        size_t cell_count;
+        uint32_t channels;
+        uint64_t token_stride;
+        uint64_t channel_stride;
+    };
+
+    typedef bool (*ggml_backend_cachegen_decode_t)(
+            const struct ggml_backend_cachegen_job * jobs,
+            size_t job_count,
+            char * error,
+            size_t error_capacity);
+
     //
     // Backend registry
     //

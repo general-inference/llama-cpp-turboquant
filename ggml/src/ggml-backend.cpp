@@ -1217,13 +1217,29 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
     sched->n_graph_inputs = 0;
     sched->is_reset = false;
 
+    ggml_free(sched->ctx);
+
+    // The split context holds the copies of split inputs. Size it for the graph
+    // being split rather than for the largest graph the scheduler accepts: the
+    // same bound, at most one split per tensor, but the capacity-based worst case
+    // is allocated up front and almost never touched, and on Windows every
+    // allocated byte counts against the commit limit. Grow only, like
+    // sched->graph below; the context is rebuilt here, so nothing points into
+    // the old buffer.
+    const size_t max_splits = (size_t) std::max(graph->n_nodes + graph->n_leafs, 1);
+    const size_t context_buffer_size = max_splits*GGML_SCHED_MAX_SPLIT_INPUTS*2*sizeof(struct ggml_tensor) +
+        ggml_graph_overhead_custom(graph->size, false);
+    if (sched->context_buffer_size < context_buffer_size) {
+        free(sched->context_buffer);
+        sched->context_buffer = (char *) malloc(context_buffer_size);
+        sched->context_buffer_size = context_buffer_size;
+    }
+
     struct ggml_init_params params = {
         /* .mem_size =   */ sched->context_buffer_size,
         /* .mem_buffer = */ sched->context_buffer,
         /* .no_alloc =   */ true
     };
-
-    ggml_free(sched->ctx);
 
     sched->ctx = ggml_init(params);
     if (sched->ctx == NULL) {
@@ -1988,8 +2004,9 @@ ggml_backend_sched_t ggml_backend_sched_new(
     sched->graph_size      = 0;
     sched->prev_graph_size = 0;
 
-    sched->context_buffer_size = ggml_sched_max_splits*GGML_SCHED_MAX_SPLIT_INPUTS*2*sizeof(struct ggml_tensor) + ggml_graph_overhead_custom(graph_size, false);
-    sched->context_buffer = (char *) malloc(sched->context_buffer_size);
+    // sized by ggml_backend_sched_split_graph for the graph it splits
+    sched->context_buffer_size = 0;
+    sched->context_buffer = NULL;
 
     const int initial_splits_capacity = 16;
     sched->splits = (ggml_backend_sched_split *) calloc(initial_splits_capacity, sizeof(sched->splits[0]));

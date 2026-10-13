@@ -101,10 +101,10 @@ add_library(${TARGET}
     peg-parser.h
     preset.cpp
     preset.h
-    reasoning-budget.cpp
     reasoning-budget.h
     sampling.cpp
     sampling.h
+    stage-chat.cpp
     speculative.cpp
     speculative.h
     subproc.cpp
@@ -143,6 +143,7 @@ endif()
 
 if (BUILD_SHARED_LIBS)
     set_target_properties(${TARGET} PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    target_compile_definitions(${TARGET} PRIVATE SKIPPY_COMMON_BUILD)
 
     # TODO: make fine-grained exports in the future
     set_target_properties(${TARGET} PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)

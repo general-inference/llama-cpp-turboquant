@@ -2,6 +2,18 @@ cmake_minimum_required(VERSION 3.14...3.28) # for add_link_options and implicit 
 project("llama.cpp" C CXX)
 include(CheckIncludeFileCXX)
 
+# Upstream added target_precompile_headers for several targets. The Skippy
+# stage rewriter (Clang LibTooling) consumes the compilation database with its
+# own clang, which cannot read a PCH produced by the configured compiler, and
+# unity-built model sources inherit those -include-pch flags when the database
+# is matched. Keep every target PCH-free so the database stays rewriter-ready.
+set(CMAKE_DISABLE_PRECOMPILE_HEADERS ON)
+
+option(LLAMA_STAGE_BUILD_TESTS "Build private Skippy native application probes" OFF)
+if (LLAMA_STAGE_BUILD_TESTS)
+    enable_testing()
+endif()
+
 ### llama.cpp version
 set(LLAMA_VERSION_MAJOR 0)
 set(LLAMA_VERSION_MINOR 7)
@@ -281,6 +293,7 @@ set(LLAMA_BIN_INSTALL_DIR     ${CMAKE_INSTALL_BINDIR}     CACHE PATH "Location o
 
 set(LLAMA_PUBLIC_HEADERS
     ${CMAKE_CURRENT_SOURCE_DIR}/include/llama.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/skippy.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/llama-cpp.h)
 
 set_target_properties(llama
@@ -288,6 +301,10 @@ set_target_properties(llama
         PUBLIC_HEADER "${LLAMA_PUBLIC_HEADERS}")
 
 install(TARGETS llama LIBRARY PUBLIC_HEADER)
+install(
+    DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/skippy
+    DESTINATION ${LLAMA_INCLUDE_INSTALL_DIR}
+    FILES_MATCHING PATTERN "*.h")
 
 if (LLAMA_BUILD_COMMON)
     install(TARGETS llama-common LIBRARY)

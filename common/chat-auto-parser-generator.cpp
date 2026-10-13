@@ -13,6 +13,18 @@
 
 using json = common_json;
 
+static bool is_ascii_space(char c) {
+    return c == ' ' || c == '\n' || c == '\r' || c == '\t' || c == '\f' || c == '\v';
+}
+
+static std::string lazy_trigger_marker(const std::string & marker) {
+    std::string trimmed = marker;
+    while (!trimmed.empty() && is_ascii_space(trimmed.back())) {
+        trimmed.pop_back();
+    }
+    return trimmed.empty() ? marker : trimmed;
+}
+
 namespace autoparser {
 
 parser_build_context::parser_build_context(common_chat_peg_builder & p, const generation_params & inputs) :
@@ -83,7 +95,7 @@ common_chat_params peg_generator::generate_parser(const common_chat_template &  
         // Set grammar triggers based on tool section markers (fall back to per-call markers)
         if (data.grammar_lazy) {
             data.grammar_triggers = {
-                { COMMON_GRAMMAR_TRIGGER_TYPE_WORD, trigger_marker }
+                { COMMON_GRAMMAR_TRIGGER_TYPE_WORD, lazy_trigger_marker(trigger_marker) }
             };
             if (autoparser.tools.format.openai_wrapper_trigger) {
                 // model emits the OpenAI function wrapper, trigger on it
@@ -367,7 +379,9 @@ common_peg_parser analyze_tools::build_tool_parser_tag_tagged(parser_build_conte
         const auto & func = tool.at("function");
         std::string  name = func.at("name");
 
-        // Build parser for each argument, separating required and optional
+        // Object member order is semantically irrelevant. Split the declared
+        // arguments into required and optional sets so the grammar can enforce
+        // presence structurally instead of validating after the fact.
         std::vector<common_peg_parser> required_parsers;
         std::vector<common_peg_parser> optional_parsers;
         foreach_parameter(func, [&](size_t param_index, const common_chat_schema_property & param, const common_chat_schema_document_ptr & doc) {
@@ -390,22 +404,33 @@ common_peg_parser analyze_tools::build_tool_parser_tag_tagged(parser_build_conte
             }
         });
 
-        // Build required arg sequence in definition order
-        common_peg_parser args_seq = p.eps();
-        for (size_t i = 0; i < required_parsers.size(); i++) {
-            if (i > 0) {
-                args_seq = args_seq + p.space();
-            }
-            args_seq = args_seq + required_parsers[i];
-        }
-
-        // Build optional args with flexible ordering
+        // Optional arguments may appear in any order, any number of times, and
+        // interleaved anywhere among the required arguments.
+        common_peg_parser optional_run = p.eps();
         if (!optional_parsers.empty()) {
             common_peg_parser any_opt = p.choice();
             for (const auto & opt : optional_parsers) {
                 any_opt |= opt;
             }
-            args_seq = args_seq + p.repeat(p.space() + any_opt, 0, -1);
+            optional_run = p.rule("tool-" + name + "-optional", p.zero_or_more(any_opt + p.space()));
+        }
+
+        // Required arguments must each appear exactly once, in any order.
+        // permute() generates every ordering while structurally requiring all of
+        // them, so the grammar sampler prevents both omission and duplication --
+        // matching the generic JSON tool path (common/chat.cpp). Optional
+        // arguments are allowed before each required argument (and after the
+        // last) so required and optional fields may be freely interleaved.
+        common_peg_parser args_seq = p.eps();
+        if (!required_parsers.empty()) {
+            std::vector<common_peg_parser> required_slots;
+            required_slots.reserve(required_parsers.size());
+            for (const auto & req : required_parsers) {
+                required_slots.push_back(optional_run + req + p.space());
+            }
+            args_seq = args_seq + p.permute("tool-" + name + "-required", required_slots) + optional_run;
+        } else {
+            args_seq = args_seq + optional_run;
         }
 
         if (!arguments.start.empty()) {

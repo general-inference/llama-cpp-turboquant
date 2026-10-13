@@ -207,6 +207,25 @@ int32_t mtmd_helper_eval_chunk_single(mtmd_context * ctx,
         int32_t n_batch,
         bool logits_last,
         llama_pos * new_n_past) {
+    return mtmd_helper_eval_chunk_single_with_callback(ctx, lctx, chunk, n_past, seq_id, n_batch, logits_last,
+                                                       new_n_past, nullptr, nullptr);
+}
+
+int32_t mtmd_helper_eval_chunk_single_with_callback(mtmd_context *                    ctx,
+                                                    llama_context *                   lctx,
+                                                    const mtmd_input_chunk *          chunk,
+                                                    llama_pos                         n_past,
+                                                    llama_seq_id                      seq_id,
+                                                    int32_t                           n_batch,
+                                                    bool                              logits_last,
+                                                    llama_pos *                       new_n_past,
+                                                    mtmd_helper_chunk_decode_callback callback,
+                                                    void *                            user_data) {
+    if (callback != nullptr) {
+        // An activation export belongs to one live graph. Never let a helper
+        // decode hide earlier microbatches before the caller can capture them.
+        n_batch = std::min(n_batch, static_cast<int32_t>(llama_n_ubatch(lctx)));
+    }
     GGML_ASSERT(n_batch > 0);
     int32_t ret;
     auto chunk_type = mtmd_input_chunk_get_type(chunk);
@@ -237,6 +256,9 @@ int32_t mtmd_helper_eval_chunk_single(mtmd_context * ctx,
                 LOG_ERR("failed to decode text\n");
                 return ret;
             }
+            if (callback != nullptr && (ret = callback(n_added, user_data)) != 0) {
+                return ret;
+            }
             *new_n_past += n_added;
         }
 
@@ -255,7 +277,18 @@ int32_t mtmd_helper_eval_chunk_single(mtmd_context * ctx,
         LOG_INF("%s slice encoded in %" PRId64 " ms\n", name, ggml_time_ms() - t0);
 
         float * embd = mtmd_get_output_embd(ctx);
-        ret = mtmd_helper_decode_image_chunk(ctx, lctx, chunk, embd, n_past, seq_id, n_batch, new_n_past, nullptr, nullptr);
+
+        struct callback_context {
+            mtmd_helper_chunk_decode_callback callback;
+            void *                            user_data;
+        } capture{ callback, user_data };
+
+        const auto after_decode = [](const mtmd_helper_embd_batch * batch, void * opaque) -> int32_t {
+            auto * capture = static_cast<callback_context *>(opaque);
+            return capture->callback(batch->n_tokens, capture->user_data);
+        };
+        ret = mtmd_helper_decode_image_chunk(ctx, lctx, chunk, embd, n_past, seq_id, n_batch, new_n_past,
+                                             callback != nullptr ? +after_decode : nullptr, &capture);
         if (ret != 0) {
             LOG_ERR("failed to decode %s\n", name);
             return ret;

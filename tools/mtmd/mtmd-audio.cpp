@@ -285,6 +285,7 @@ struct filter_params {
     float   mel_floor       = 5.960464477539063e-08f;
     bool    mel_floor_add   = false;  // log(x + floor) instead of log(max(x, floor))
     bool    std_eps_after_sqrt = false;  // std + eps instead of sqrt(var + eps)
+    float   power_floor     = 0.0f;   // clamp |X|^2 to this before sqrt (0 = disabled)
 };
 
 static void log_mel_spectrogram_worker_thread(int                        ith,
@@ -329,6 +330,7 @@ static void log_mel_spectrogram_worker_thread(int                        ith,
         // Calculate modulus^2 (power) or modulus (magnitude)
         for (int j = 0; j < n_fft_bins; j++) {
             float power = (fft_out[2 * j + 0] * fft_out[2 * j + 0] + fft_out[2 * j + 1] * fft_out[2 * j + 1]);
+            power = std::max(power, params.power_floor);
             fft_out[j] = params.use_magnitude ? sqrtf(power) : power;
         }
 

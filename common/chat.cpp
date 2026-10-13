@@ -196,6 +196,11 @@ json common_chat_msg::to_json_oaicompat(bool concat_typed_text) const {
                 });
             }
         }
+    } else if (!content_present) {
+        // Preserve an omitted OpenAI-compatible content field. Some templates
+        // distinguish this from explicit null and an empty string.
+    } else if (content_is_null) {
+        jmsg["content"] = nullptr;
     } else {
         jmsg["content"] = "";
     }
@@ -360,6 +365,7 @@ std::vector<common_chat_msg> common_chat_msgs_parse_oaicompat(const json & messa
 
             auto has_content    = message.contains("content");
             auto has_tool_calls = message.contains("tool_calls");
+            msg.content_present = has_content;
             if (has_content) {
                 const auto & content = message.at("content");
                 if (content.is_string()) {
@@ -378,7 +384,9 @@ std::vector<common_chat_msg> common_chat_msgs_parse_oaicompat(const json & messa
                         msg_part.text = part.at("text");
                         msg.content_parts.push_back(msg_part);
                     }
-                } else if (!content.is_null()) {
+                } else if (content.is_null()) {
+                    msg.content_is_null = true;
+                } else {
                     throw std::invalid_argument("Invalid 'content' type: expected string or array, got " +
                                                 content.dump() +
                                                 " (ref: https://github.com/ggml-org/llama.cpp/issues/8367)");
@@ -413,11 +421,6 @@ std::vector<common_chat_msg> common_chat_msgs_parse_oaicompat(const json & messa
                     }
                     msg.tool_calls.push_back(tc);
                 }
-            }
-            if (!has_content && !has_tool_calls) {
-                throw std::invalid_argument(
-                    "Expected 'content' or 'tool_calls' (ref: https://github.com/ggml-org/llama.cpp/issues/8367 & "
-                    "https://github.com/ggml-org/llama.cpp/issues/12279)");
             }
             if (message.contains("reasoning_content")) {
                 msg.reasoning_content = message.at("reasoning_content");
@@ -692,6 +695,113 @@ std::string common_chat_format_example(const struct common_chat_templates *     
     "  {{- '<|im_start|>assistant\n' -}}\n"                                               \
     "{%- endif -%}"
 
+// Fallback copied from the official zai-org/GLM-4.7-Flash chat_template.jinja.
+// In particular, the generation-prompt branch that emits a leading </think>
+// when enable_thinking=false is upstream GLM template behavior, not skippy policy.
+static const char * GLM_4_7_FALLBACK_TEMPLATE_SRC = R"jinja([gMASK]<sop>
+{%- if tools -%}
+<|system|>
+# Tools
+
+You may call one or more functions to assist with the user query.
+
+You are provided with function signatures within <tools></tools> XML tags:
+<tools>
+{% for tool in tools %}
+{{ tool | tojson(ensure_ascii=False) }}
+{% endfor %}
+</tools>
+
+For each function call, output the function name and arguments within the following XML format:
+<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call>{%- endif -%}
+{%- macro visible_text(content) -%}
+    {%- if content is string -%}
+        {{- content }}
+    {%- elif content is iterable and content is not mapping -%}
+        {%- for item in content -%}
+            {%- if item is mapping and item.type == 'text' -%}
+                {{- item.text }}
+            {%- elif item is string -%}
+                {{- item }}
+            {%- endif -%}
+        {%- endfor -%}
+    {%- else -%}
+        {{- content }}
+    {%- endif -%}
+{%- endmacro -%}
+{%- set ns = namespace(last_user_index=-1) %}
+{%- for m in messages %}
+    {%- if m.role == 'user' %}
+        {% set ns.last_user_index = loop.index0 -%}
+    {%- endif %}
+{%- endfor %}
+{% for m in messages %}
+{%- if m.role == 'user' -%}<|user|>{{ visible_text(m.content) }}
+{%- elif m.role == 'assistant' -%}
+<|assistant|>
+{%- set reasoning_content = '' %}
+{%- set content = visible_text(m.content) %}
+{%- if m.reasoning_content is string %}
+    {%- set reasoning_content = m.reasoning_content %}
+{%- else %}
+    {%- if '</think>' in content %}
+        {%- set reasoning_content = content.split('</think>')[0].rstrip('\n').split('<think>')[-1].lstrip('\n') %}
+        {%- set content = content.split('</think>')[-1].lstrip('\n') %}
+    {%- endif %}
+{%- endif %}
+{%- if ((clear_thinking is defined and not clear_thinking) or loop.index0 > ns.last_user_index) and reasoning_content -%}
+{{ '<think>' + reasoning_content.strip() +  '</think>'}}
+{%- else -%}
+{{ '</think>' }}
+{%- endif -%}
+{%- if content.strip() -%}
+{{ content.strip() }}
+{%- endif -%}
+{% if m.tool_calls %}
+{% for tc in m.tool_calls %}
+{%- if tc.function %}
+    {%- set tc = tc.function %}
+{%- endif %}
+{{- '<tool_call>' + tc.name -}}
+{% set _args = tc.arguments %}{% for k, v in _args.items() %}<arg_key>{{ k }}</arg_key><arg_value>{{ v | tojson(ensure_ascii=False) if v is not string else v }}</arg_value>{% endfor %}</tool_call>{% endfor %}
+{% endif %}
+{%- elif m.role == 'tool' -%}
+{%- if m.content is string -%}
+{%- if loop.first or (messages[loop.index0 - 1].role != "tool") %}
+    {{- '<|observation|>' }}
+{%- endif %}
+{{- '<tool_response>' }}
+{{- m.content }}
+{{- '</tool_response>' }}
+{%- else -%}
+<|observation|>{% for tr in m.content %}
+<tool_response>{{ tr.output if tr.output is defined else tr }}</tool_response>{% endfor -%}
+{% endif -%}
+{%- elif m.role == 'system' -%}
+<|system|>{{ visible_text(m.content) }}
+{%- endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+    <|assistant|>{{- '</think>' if (enable_thinking is defined and not enable_thinking) else '<think>' -}}
+{%- endif -%})jinja";
+
+static std::string common_chat_vocab_piece(const struct llama_vocab * vocab, llama_token token) {
+    return token == LLAMA_TOKEN_NULL ? std::string() : common_token_to_piece(vocab, token, true);
+}
+
+static bool common_chat_model_has_glm4_vocab(const struct llama_model * model) {
+    if (model == nullptr) {
+        return false;
+    }
+    const auto * vocab = llama_model_get_vocab(model);
+    if (vocab == nullptr) {
+        return false;
+    }
+    return common_chat_vocab_piece(vocab, llama_vocab_bos(vocab)) == "[gMASK]" &&
+           common_chat_vocab_piece(vocab, llama_vocab_eos(vocab)) == "<|endoftext|>" &&
+           common_chat_vocab_piece(vocab, llama_vocab_eot(vocab)) == "<|user|>";
+}
+
 void common_chat_templates_free(struct common_chat_templates * tmpls) {
     delete tmpls;
 }
@@ -748,6 +858,10 @@ common_chat_templates_ptr common_chat_templates_init(const struct llama_model * 
         }
     } else {
         default_template_src = chat_template_override;
+    }
+    if (default_template_src.empty() && template_tool_use_src.empty() && common_chat_model_has_glm4_vocab(model)) {
+        LOG_DBG("%s: using built-in GLM 4.7 fallback chat template\n", __func__);
+        default_template_src = GLM_4_7_FALLBACK_TEMPLATE_SRC;
     }
     if (default_template_src.empty() || default_template_src == "chatml") {
         if (!template_tool_use_src.empty()) {

@@ -93,8 +93,13 @@ function(ggml_cuda_fattn_vec_instances DIR OUT_SRCS)
     endif()
     list(REMOVE_DUPLICATES FA_COMBINATIONS)
 
-    string(REPLACE ";" "," FA_QUANTS_DEFINE "${FA_QUANTS}")
-    add_compile_definitions(GGML_CUDA_FA_QUANTS="${FA_QUANTS_DEFINE}")
+    # Encode list separators as colons for the compiler command line. nvcc
+    # treats commas inside -D values as option separators, while quoted
+    # definitions are re-emitted with escaped quotes that Windows sccache
+    # cannot parse.
+    string(REPLACE ";" ":" FA_QUANTS_DEFINE "${FA_QUANTS}")
+    string(REPLACE "," ":" FA_QUANTS_DEFINE "${FA_QUANTS_DEFINE}")
+    add_compile_definitions(GGML_CUDA_FA_QUANTS=${FA_QUANTS_DEFINE})
     foreach (TYPE_V IN LISTS FA_TYPES)
         foreach (TYPE_K IN LISTS FA_TYPES)
             if ("${TYPE_K}-${TYPE_V}" IN_LIST FA_COMBINATIONS)

@@ -11,6 +11,8 @@
 #include <Metal/Metal.h>
 
 #include <stdatomic.h>
+#include <limits.h>
+#include <stdio.h>
 
 #ifndef TARGET_OS_VISION
 #define TARGET_OS_VISION 0
@@ -110,6 +112,7 @@ int ggml_metal_pipeline_max_theads_per_threadgroup(struct ggml_metal_pipeline_wi
 //   X(suffix, name): name is both the kernels/<name>.metal basename and the
 //   ggml_metallib_<name>_{start,end} embed-symbol stem.
 #define GGML_METAL_LIBS \
+    X(CACHEGEN,        cachegen)       \
     X(FA_AUX,          fa_aux)         \
     X(FA_F16,          fa_f16)         \
     X(FA_F32,          fa_f32)         \
@@ -180,6 +183,11 @@ struct ggml_metal_library {
     ggml_metal_device_t dev;
     ggml_metal_pipelines_t pipelines; // cache of compiled pipelines
 
+    // Optional on-disk cache of compiled pipeline states (MTLBinaryArchive),
+    // enabled via GGML_METAL_PIPELINE_CACHE_DIR. nil when disabled.
+    id<MTLBinaryArchive> pso_archive;
+    NSURL * pso_archive_url;
+
     NSLock * lock;
 };
 
@@ -207,6 +215,98 @@ static void ggml_metal_compile_options_set_lang(MTLCompileOptions * options, boo
     }
 
     options.languageVersion = (MTLLanguageVersion) MTLLanguageVersion4_0_GGML;
+}
+
+// FNV-1a 64-bit, used to fingerprint the inputs that determine pipeline
+// specialization so a stale on-disk archive is never consulted.
+static uint64_t ggml_metal_fnv1a64(uint64_t h, const void * data, size_t len) {
+    const unsigned char * p = (const unsigned char *) data;
+    for (size_t i = 0; i < len; ++i) {
+        h ^= p[i];
+        h *= 0x100000001b3ULL;
+    }
+    return h;
+}
+
+// Attach an on-disk MTLBinaryArchive to the library so pipeline compilation
+// can load previously compiled pipeline states and append new ones. The file
+// name embeds a fingerprint (device + ggml version + preprocessor macros +
+// kernel source hash) so a changed environment resolves to a different file
+// instead of a stale archive. Any failure leaves the cache disabled; pipeline
+// compilation then proceeds exactly as without this feature.
+static void ggml_metal_pso_cache_setup(ggml_metal_library_t lib, id<MTLDevice> device, NSDictionary * prep, uint64_t source_hash) {
+    if (@available(macOS 11.0, iOS 14.0, *)) {
+        const char * dir = getenv("GGML_METAL_PIPELINE_CACHE_DIR");
+        if (!dir || !dir[0]) {
+            return;
+        }
+
+        const struct ggml_metal_device_props * props = ggml_metal_device_get_props(lib->dev);
+
+        uint64_t h = 0xcbf29ce484222325ULL;
+        h = ggml_metal_fnv1a64(h, props->desc, strlen(props->desc));
+        h = ggml_metal_fnv1a64(h, ggml_version(), strlen(ggml_version()));
+        for (NSString * key in [prep.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+            NSString * val = prep[key];
+            h = ggml_metal_fnv1a64(h, key.UTF8String, key.length);
+            h = ggml_metal_fnv1a64(h, val.UTF8String, val.length);
+        }
+        h ^= source_hash;
+        h *= 0x100000001b3ULL;
+
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "%s/pipelines-%016llx.metallibar", dir, (unsigned long long) h);
+
+        NSString * path_ns = [NSString stringWithUTF8String:path];
+        NSURL * url = [NSURL fileURLWithPath:path_ns];
+
+        NSError * error = nil;
+        if (![[NSFileManager defaultManager] createDirectoryAtPath:[NSString stringWithUTF8String:dir]
+                                      withIntermediateDirectories:YES
+                                                       attributes:nil
+                                                            error:&error]) {
+            GGML_LOG_WARN("%s: cannot create pipeline cache dir '%s'\n", __func__, dir);
+            return;
+        }
+
+        MTLBinaryArchiveDescriptor * desc = [MTLBinaryArchiveDescriptor new];
+        desc.url = url;
+
+        id<MTLBinaryArchive> archive = [device newBinaryArchiveWithDescriptor:desc error:&error];
+        if (!archive) {
+            // no usable archive at this path (missing or incompatible): start a fresh one
+            GGML_LOG_INFO("%s: no usable pipeline cache at '%s', starting fresh\n", __func__, path);
+            desc.url = nil;
+            archive = [device newBinaryArchiveWithDescriptor:desc error:&error];
+        }
+
+        [desc release];
+
+        if (!archive) {
+            GGML_LOG_WARN("%s: failed to create binary archive: %s\n", __func__, [[error description] UTF8String]);
+            return;
+        }
+
+        lib->pso_archive     = archive;
+        lib->pso_archive_url = [url retain];
+
+        GGML_LOG_INFO("%s: Metal pipeline cache: %s\n", __func__, path);
+    }
+}
+
+// Persist the archive so later processes can reuse the compiled pipelines.
+// Called once when the library is released, after pipeline compilation ends.
+static void ggml_metal_pso_cache_flush(ggml_metal_library_t lib) {
+    if (@available(macOS 11.0, iOS 14.0, *)) {
+        if (!lib->pso_archive) {
+            return;
+        }
+
+        NSError * error = nil;
+        if (![lib->pso_archive serializeToURL:lib->pso_archive_url error:&error]) {
+            GGML_LOG_WARN("%s: failed to serialize pipeline cache: %s\n", __func__, [[error description] UTF8String]);
+        }
+    }
 }
 
 // Parse a `#include "name"` line. Returns the quoted name in *include_name on
@@ -319,12 +419,14 @@ static bool ggml_metal_library_compile_all(
         id<MTLDevice> device,
         NSDictionary * prep,
         NSString * (^source_for_kind)(int kind, NSError ** err),
-        const char * origin) {
+        const char * origin,
+        uint64_t * source_hash_out) {
     const int64_t t_start = ggml_time_us();
 
     int64_t  * t_per_lib   = calloc(GGML_METAL_LIB_COUNT, sizeof(int64_t));
     NSError ** err_per_lib = calloc(GGML_METAL_LIB_COUNT, sizeof(NSError *));
     __block atomic_bool any_failure = false;
+    uint64_t * source_hash_per_lib = calloc(GGML_METAL_LIB_COUNT, sizeof(uint64_t));
 
     dispatch_group_t group = dispatch_group_create();
     dispatch_queue_t queue = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
@@ -342,6 +444,11 @@ static bool ggml_metal_library_compile_all(
                 atomic_store(&any_failure, true);
                 return;
             }
+
+            // Hash each source independently; fold by kind only after all
+            // concurrent compilation blocks have completed.
+            const char * bytes = src.UTF8String;
+            source_hash_per_lib[kind] = ggml_metal_fnv1a64(0xcbf29ce484222325ULL, bytes, strlen(bytes));
 
             id<MTLLibrary> lib = nil;
 
@@ -376,6 +483,18 @@ static bool ggml_metal_library_compile_all(
     dispatch_release(group);
 
     const bool ok = !atomic_load(&any_failure);
+
+    uint64_t source_hash = 0xcbf29ce484222325ULL;
+    for (int kind = 0; kind < GGML_METAL_LIB_COUNT; ++kind) {
+        source_hash = ggml_metal_fnv1a64(source_hash, &kind, sizeof(kind));
+        source_hash = ggml_metal_fnv1a64(source_hash, &source_hash_per_lib[kind],
+                                         sizeof(source_hash_per_lib[kind]));
+    }
+
+    if (source_hash_out) {
+        *source_hash_out = source_hash;
+    }
+    free(source_hash_per_lib);
 
     if (ok) {
         const int64_t t_total = ggml_time_us() - t_start;
@@ -484,18 +603,22 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
 #undef X
     };
 
+    uint64_t source_hash = 0;
+
     const bool ok = ggml_metal_library_compile_all(res, device, prep,
         ^NSString * (int kind, NSError ** err) {
             (void) err;
             return [[NSString alloc] initWithBytes:lib_start[kind]
                                             length:(lib_end[kind] - lib_start[kind])
                                           encoding:NSUTF8StringEncoding];
-        }, "embedded data");
+        }, "embedded data", &source_hash);
 
     if (!ok) {
         ggml_metal_library_free(res);
         return NULL;
     }
+
+    ggml_metal_pso_cache_setup(res, device, prep, source_hash);
 
     return res;
 #else
@@ -548,6 +671,9 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
         }
 
         GGML_LOG_INFO("%s: loaded in %.3f sec\n", __func__, (ggml_time_us() - t_start) / 1e6);
+
+        ggml_metal_pso_cache_setup(res, device, prep, 0);
+
         return res;
     }
 
@@ -582,10 +708,11 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
         path_per_kind[kind] = [path_source retain];
     }
 
+    uint64_t source_hash = 0;
     const bool ok = ggml_metal_library_compile_all(res, device, prep,
         ^NSString * (int kind, NSError ** err) {
             return ggml_metal_library_flatten_source(path_per_kind[kind], err);
-        }, "source");
+        }, "source", &source_hash);
 
     for (int kind = 0; kind < GGML_METAL_LIB_COUNT; ++kind) {
         [path_per_kind[kind] release];
@@ -596,6 +723,8 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
         ggml_metal_library_free(res);
         return NULL;
     }
+
+    ggml_metal_pso_cache_setup(res, device, prep, source_hash);
 
     return res;
 #endif
@@ -691,6 +820,14 @@ void ggml_metal_library_free(ggml_metal_library_t lib) {
 
     ggml_metal_pipelines_free(lib->pipelines);
 
+    if (lib->pso_archive) {
+        ggml_metal_pso_cache_flush(lib);
+        [lib->pso_archive release];
+    }
+    if (lib->pso_archive_url) {
+        [lib->pso_archive_url release];
+    }
+
     [lib->lock release];
 
     free(lib);
@@ -784,7 +921,32 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_compile_pipeline(ggml_
         }
 
         id<MTLDevice> device = ggml_metal_device_get_obj(lib->dev);
-        id<MTLComputePipelineState> obj = [device newComputePipelineStateWithFunction:mtl_function error:&error];
+        id<MTLComputePipelineState> obj = nil;
+
+        if (@available(macOS 11.0, iOS 14.0, *)) {
+            if (lib->pso_archive) {
+                // descriptor-based creation consults the archive before compiling
+                NSError * add_error = nil;
+                MTLComputePipelineDescriptor * pdesc = [MTLComputePipelineDescriptor new];
+                pdesc.computeFunction = mtl_function;
+                pdesc.binaryArchives  = @[lib->pso_archive];
+
+                obj = [device newComputePipelineStateWithDescriptor:pdesc
+                                                             options:MTLPipelineOptionNone
+                                                          reflection:nil
+                                                               error:&error];
+
+                if (obj && ![lib->pso_archive addComputePipelineFunctionsWithDescriptor:pdesc error:&add_error]) {
+                    GGML_LOG_WARN("%s: failed to add pipeline to archive: %s\n", __func__, [[add_error description] UTF8String]);
+                }
+
+                [pdesc release];
+            } else {
+                obj = [device newComputePipelineStateWithFunction:mtl_function error:&error];
+            }
+        } else {
+            obj = [device newComputePipelineStateWithFunction:mtl_function error:&error];
+        }
 
         [mtl_function release];
 
@@ -1754,6 +1916,29 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
             if (op->src[1]->type != op->src[2]->type) {
                 return false;
             }
+            {
+                // only the instantiated (dk, dv) kernel families can run on Metal
+                const int64_t dk = op->src[1]->ne[0];
+                const int64_t dv = op->src[2]->ne[0];
+                const bool dk_dv_ok = (dk == 32  && dv == 32)  ||
+                                      (dk == 40  && dv == 40)  ||
+                                      (dk == 48  && dv == 48)  ||
+                                      (dk == 64  && dv == 64)  ||
+                                      (dk == 72  && dv == 72)  ||
+                                      (dk == 80  && dv == 80)  ||
+                                      (dk == 96  && dv == 96)  ||
+                                      (dk == 112 && dv == 112) ||
+                                      (dk == 128 && dv == 128) ||
+                                      (dk == 192 && dv == 128) ||
+                                      (dk == 192 && dv == 192) ||
+                                      (dk == 256 && dv == 256) ||
+                                      (dk == 320 && dv == 256) ||
+                                      (dk == 512 && dv == 512) ||
+                                      (dk == 576 && dv == 512);
+                if (!dk_dv_ok) {
+                    return false;
+                }
+            }
             switch (op->src[1]->type) {
                 case GGML_TYPE_F32:
                 case GGML_TYPE_F16:
@@ -2514,4 +2699,263 @@ struct ggml_metal_buffer_id ggml_metal_buffer_get_id(ggml_metal_buffer_t buf, co
     GGML_LOG_ERROR("%s: error: tensor '%s' buffer is nil\n", __func__, t->name);
 
     return res;
+}
+
+struct ggml_metal_cachegen_tile {
+    uint32_t payload_offset;
+    uint32_t prefix_offset;
+    uint32_t token_offset;
+    uint32_t rows;
+};
+
+struct ggml_metal_cachegen_params {
+    uint32_t channels;
+    uint32_t tile_count;
+    uint32_t element_bytes;
+    uint64_t token_stride;
+    uint64_t channel_stride;
+};
+
+static bool ggml_metal_cachegen_error(char * error, size_t capacity, const char * message) {
+    if (error != NULL && capacity > 0) {
+        snprintf(error, capacity, "%s", message);
+    }
+    return false;
+}
+
+bool ggml_metal_cachegen_decode(
+        const struct ggml_backend_cachegen_job * jobs,
+        size_t job_count,
+        char * error,
+        size_t error_capacity) {
+    if (jobs == NULL || job_count == 0) {
+        return ggml_metal_cachegen_error(error, error_capacity, "Metal CacheGen jobs are required");
+    }
+
+    @autoreleasepool {
+        ggml_metal_device_t device = NULL;
+        id<MTLCommandBuffer> cmd_buf = nil;
+        id<MTLComputeCommandEncoder> encoder = nil;
+        NSMutableArray * temporary_buffers = [[NSMutableArray alloc] init];
+        for (size_t job_index = 0; job_index < job_count; ++job_index) {
+            const struct ggml_backend_cachegen_job * job = &jobs[job_index];
+            const bool quantized = job->dst != NULL &&
+                (job->dst->type == GGML_TYPE_Q8_0 || job->dst->type == GGML_TYPE_Q4_0);
+            if (job->dst == NULL || job->dst->buffer == NULL || job->tiles == NULL || job->tile_count == 0 ||
+                    job->tile_count > UINT32_MAX || job->cells == NULL || job->cell_count == 0 || job->channels == 0 ||
+                    job->channels == UINT32_MAX ||
+                    (job->dst->type != GGML_TYPE_F16 && job->dst->type != GGML_TYPE_F32 &&
+                     job->dst->type != GGML_TYPE_Q8_0 && job->dst->type != GGML_TYPE_Q4_0) ||
+                    (quantized && job->channels % 32 != 0) ||
+                    job->token_stride == 0 || job->channel_stride == 0 ||
+                    job->token_stride % ggml_type_size(job->dst->type) != 0 ||
+                    job->channel_stride % ggml_type_size(job->dst->type) != 0 ||
+                    job->cell_count > SIZE_MAX / sizeof(uint32_t)) {
+                [temporary_buffers release];
+                return ggml_metal_cachegen_error(error, error_capacity, "invalid Metal CacheGen job");
+            }
+            uint64_t max_cell = 0;
+            for (size_t cell_index = 0; cell_index < job->cell_count; ++cell_index) {
+                max_cell = MAX(max_cell, job->cells[cell_index]);
+            }
+            const uint64_t output_units = quantized ? job->channels / 32 : job->channels;
+            const uint64_t max_channel = output_units - 1;
+            const uint64_t element_bytes = ggml_type_size(job->dst->type);
+            if (max_cell > (UINT64_MAX - element_bytes) / job->token_stride ||
+                    max_channel > (UINT64_MAX - max_cell * job->token_stride - element_bytes) / job->channel_stride ||
+                    max_cell * job->token_stride + max_channel * job->channel_stride + element_bytes > ggml_nbytes(job->dst)) {
+                [temporary_buffers release];
+                return ggml_metal_cachegen_error(error, error_capacity, "Metal CacheGen destination geometry is out of bounds");
+            }
+            ggml_metal_buffer_t dst_buffer = (ggml_metal_buffer_t) job->dst->buffer->context;
+            if (dst_buffer == NULL || (device != NULL && device != dst_buffer->dev)) {
+                [temporary_buffers release];
+                return ggml_metal_cachegen_error(error, error_capacity, "Metal CacheGen jobs span incompatible devices");
+            }
+            if (device == NULL) {
+                device = dst_buffer->dev;
+                cmd_buf = [device->mtl_queue commandBufferWithUnretainedReferences];
+                encoder = [cmd_buf computeCommandEncoder];
+                if (cmd_buf == nil || encoder == nil) {
+                    [temporary_buffers release];
+                    return ggml_metal_cachegen_error(error, error_capacity, "Metal CacheGen command allocation failed");
+                }
+            }
+
+            size_t staged_payload_bytes = 0;
+            size_t staged_prefix_count = 0;
+            for (size_t tile_index = 0; tile_index < job->tile_count; ++tile_index) {
+                const struct ggml_backend_cachegen_tile * tile = &job->tiles[tile_index];
+                if (tile->payload == NULL || tile->payload_bytes < 16 || tile->token_count == 0 ||
+                        tile->token_count > 256 ||
+                        tile->token_offset > job->cell_count || tile->token_count > job->cell_count - tile->token_offset ||
+                        staged_payload_bytes > UINT32_MAX - 3 ||
+                        staged_prefix_count > UINT32_MAX - ((size_t) job->channels + 1)) {
+                    [encoder endEncoding];
+                    [temporary_buffers release];
+                    return ggml_metal_cachegen_error(error, error_capacity, "Metal CacheGen tile exceeds bounded geometry");
+                }
+                const size_t aligned_payload_size = (staged_payload_bytes + 3) & ~(size_t) 3;
+                if (tile->payload_bytes > UINT32_MAX - aligned_payload_size) {
+                    [encoder endEncoding];
+                    [temporary_buffers release];
+                    return ggml_metal_cachegen_error(error, error_capacity, "Metal CacheGen payload offsets overflow");
+                }
+                const uint8_t * payload = (const uint8_t *) tile->payload;
+                const bool packed = memcmp(payload, "LCG2", 4) == 0;
+                const uint32_t bins = payload[4];
+                const uint32_t expected_bits = bins == 16 ? 4 : 5;
+                const uint32_t header_rows = (uint32_t) payload[6] | (uint32_t) payload[7] << 8;
+                const uint32_t header_channels = (uint32_t) payload[8] | (uint32_t) payload[9] << 8 |
+                    (uint32_t) payload[10] << 16 | (uint32_t) payload[11] << 24;
+                if ((!packed && memcmp(payload, "LCG1", 4) != 0) || (bins != 16 && bins != 32) ||
+                        (packed ? payload[5] != expected_bits : payload[5] != 0) ||
+                        header_rows != tile->token_count || header_channels != job->channels) {
+                    [encoder endEncoding];
+                    [temporary_buffers release];
+                    return ggml_metal_cachegen_error(error, error_capacity, "Metal CacheGen tile header is inconsistent");
+                }
+                const uint32_t declared_stream_bytes = (uint32_t) payload[12] |
+                    (uint32_t) payload[13] << 8 | (uint32_t) payload[14] << 16 | (uint32_t) payload[15] << 24;
+                if (packed) {
+                    const uint64_t values = (uint64_t) tile->token_count * job->channels;
+                    const uint64_t expected_stream_bytes = (values * expected_bits + 7) / 8;
+                    const size_t streams_offset = 16 + (size_t) tile->token_count * sizeof(float);
+                    if (expected_stream_bytes > UINT32_MAX || streams_offset > tile->payload_bytes ||
+                            declared_stream_bytes != expected_stream_bytes ||
+                            declared_stream_bytes != tile->payload_bytes - streams_offset) {
+                        [encoder endEncoding];
+                        [temporary_buffers release];
+                        return ggml_metal_cachegen_error(error, error_capacity, "Metal CacheGen packed length is inconsistent");
+                    }
+                } else {
+                    const size_t lengths_offset = 16 + (size_t) tile->token_count * sizeof(float) +
+                        (size_t) job->channels * 33 * sizeof(uint16_t);
+                    const size_t streams_offset = lengths_offset + (size_t) job->channels * sizeof(uint16_t);
+                    if (streams_offset > tile->payload_bytes) {
+                        [encoder endEncoding];
+                        [temporary_buffers release];
+                        return ggml_metal_cachegen_error(error, error_capacity, "Metal CacheGen tile metadata is truncated");
+                    }
+                    uint32_t prefix = 0;
+                    for (uint32_t channel = 0; channel < job->channels; ++channel) {
+                        const size_t offset = lengths_offset + (size_t) channel * sizeof(uint16_t);
+                        const uint32_t length = (uint32_t) payload[offset] | (uint32_t) payload[offset + 1] << 8;
+                        if (prefix > UINT32_MAX - length) {
+                            [encoder endEncoding];
+                            [temporary_buffers release];
+                            return ggml_metal_cachegen_error(error, error_capacity, "Metal CacheGen stream offsets overflow");
+                        }
+                        prefix += length;
+                    }
+                    if (prefix != declared_stream_bytes || prefix != tile->payload_bytes - streams_offset) {
+                        [encoder endEncoding];
+                        [temporary_buffers release];
+                        return ggml_metal_cachegen_error(error, error_capacity, "Metal CacheGen stream length is inconsistent");
+                    }
+                }
+                staged_payload_bytes = aligned_payload_size + tile->payload_bytes;
+                staged_prefix_count += packed ? 1 : (size_t) job->channels + 1;
+            }
+
+            id<MTLBuffer> payload_buffer = [device->mtl_device newBufferWithLength:staged_payload_bytes
+                options:MTLResourceStorageModeShared];
+            id<MTLBuffer> tile_buffer = [device->mtl_device newBufferWithLength:job->tile_count * sizeof(struct ggml_metal_cachegen_tile)
+                options:MTLResourceStorageModeShared];
+            id<MTLBuffer> prefix_buffer = [device->mtl_device newBufferWithLength:staged_prefix_count * sizeof(uint32_t)
+                options:MTLResourceStorageModeShared];
+            id<MTLBuffer> cell_buffer = [device->mtl_device newBufferWithBytes:job->cells
+                length:job->cell_count * sizeof(uint32_t) options:MTLResourceStorageModeShared];
+            if (payload_buffer == nil || tile_buffer == nil || prefix_buffer == nil || cell_buffer == nil) {
+                [payload_buffer release];
+                [tile_buffer release];
+                [prefix_buffer release];
+                [cell_buffer release];
+                [encoder endEncoding];
+                [temporary_buffers release];
+                return ggml_metal_cachegen_error(error, error_capacity, "Metal CacheGen staging allocation failed");
+            }
+            uint8_t * payload_contents = (uint8_t *) payload_buffer.contents;
+            struct ggml_metal_cachegen_tile * tile_contents =
+                (struct ggml_metal_cachegen_tile *) tile_buffer.contents;
+            uint32_t * prefix_contents = (uint32_t *) prefix_buffer.contents;
+            size_t payload_offset = 0;
+            size_t prefix_offset = 0;
+            for (size_t tile_index = 0; tile_index < job->tile_count; ++tile_index) {
+                const struct ggml_backend_cachegen_tile * tile = &job->tiles[tile_index];
+                const size_t aligned_payload_offset = (payload_offset + 3) & ~(size_t) 3;
+                memset(payload_contents + payload_offset, 0, aligned_payload_offset - payload_offset);
+                memcpy(payload_contents + aligned_payload_offset, tile->payload, tile->payload_bytes);
+                tile_contents[tile_index] = (struct ggml_metal_cachegen_tile) {
+                    (uint32_t) aligned_payload_offset,
+                    (uint32_t) prefix_offset,
+                    tile->token_offset,
+                    tile->token_count,
+                };
+                const uint8_t * payload = (const uint8_t *) tile->payload;
+                uint32_t prefix = 0;
+                prefix_contents[prefix_offset++] = prefix;
+                if (memcmp(payload, "LCG2", 4) != 0) {
+                    const size_t lengths_offset = 16 + (size_t) tile->token_count * sizeof(float) +
+                        (size_t) job->channels * 33 * sizeof(uint16_t);
+                    for (uint32_t channel = 0; channel < job->channels; ++channel) {
+                        const size_t offset = lengths_offset + (size_t) channel * sizeof(uint16_t);
+                        prefix += (uint32_t) payload[offset] | (uint32_t) payload[offset + 1] << 8;
+                        prefix_contents[prefix_offset++] = prefix;
+                    }
+                }
+                payload_offset = aligned_payload_offset + tile->payload_bytes;
+            }
+            [temporary_buffers addObject:payload_buffer];
+            [temporary_buffers addObject:tile_buffer];
+            [temporary_buffers addObject:prefix_buffer];
+            [temporary_buffers addObject:cell_buffer];
+            [payload_buffer release];
+            [tile_buffer release];
+            [prefix_buffer release];
+            [cell_buffer release];
+
+            const struct ggml_metal_pipeline_with_params pipeline =
+                ggml_metal_library_compile_pipeline(device->library,
+                    "kernel_cachegen_decode", "kernel_cachegen_decode", NULL);
+            if (pipeline.pipeline == NULL) {
+                [encoder endEncoding];
+                [temporary_buffers release];
+                return ggml_metal_cachegen_error(error, error_capacity, "Metal CacheGen pipeline is unavailable");
+            }
+            const struct ggml_metal_buffer_id dst = ggml_metal_buffer_get_id(dst_buffer, job->dst);
+            if (dst.metal == NULL) {
+                [encoder endEncoding];
+                [temporary_buffers release];
+                return ggml_metal_cachegen_error(error, error_capacity, "Metal CacheGen destination buffer is unavailable");
+            }
+            const struct ggml_metal_cachegen_params params = {
+                job->channels,
+                (uint32_t) job->tile_count,
+                (uint32_t) element_bytes,
+                job->token_stride,
+                job->channel_stride,
+            };
+            [encoder setComputePipelineState:pipeline.pipeline->obj];
+            [encoder setBuffer:temporary_buffers[temporary_buffers.count - 4] offset:0 atIndex:0];
+            [encoder setBuffer:temporary_buffers[temporary_buffers.count - 3] offset:0 atIndex:1];
+            [encoder setBuffer:temporary_buffers[temporary_buffers.count - 2] offset:0 atIndex:2];
+            [encoder setBuffer:temporary_buffers[temporary_buffers.count - 1] offset:0 atIndex:3];
+            [encoder setBuffer:dst.metal offset:dst.offs atIndex:4];
+            [encoder setBytes:&params length:sizeof(params) atIndex:5];
+            const uint32_t threads_per_group = quantized ? 32 : 64;
+            [encoder dispatchThreadgroups:MTLSizeMake((job->channels - 1) / threads_per_group + 1, job->tile_count, 1)
+                threadsPerThreadgroup:MTLSizeMake(threads_per_group, 1, 1)];
+        }
+        [encoder endEncoding];
+        [cmd_buf commit];
+        [cmd_buf waitUntilCompleted];
+        if (cmd_buf.status == MTLCommandBufferStatusError) {
+            const char * message = cmd_buf.error == nil ? "Metal CacheGen command failed" : cmd_buf.error.localizedDescription.UTF8String;
+            [temporary_buffers release];
+            return ggml_metal_cachegen_error(error, error_capacity, message);
+        }
+        [temporary_buffers release];
+    }
+    return true;
 }

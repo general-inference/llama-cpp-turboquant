@@ -2,8 +2,6 @@
 
 #include "llama.h"
 
-#include "common.h"
-
 #include <cstdint>
 #include <vector>
 
@@ -33,20 +31,20 @@ enum common_reasoning_budget_state {
 //   budget         - max tokens allowed in the reasoning block
 //   initial_state  - initial state
 //
-struct llama_sampler * common_reasoning_budget_init(
+LLAMA_API struct llama_sampler * common_reasoning_budget_init(
         const struct llama_vocab        * vocab,
-        const std::vector<llama_tokens> & start_seqs,
-        const std::vector<llama_tokens> & end_seqs,
-        const llama_tokens              & forced_tokens,
+        const std::vector<std::vector<llama_token>> & start_seqs,
+        const std::vector<std::vector<llama_token>> & end_seqs,
+        const std::vector<llama_token>              & forced_tokens,
         int32_t                           budget,
         common_reasoning_budget_state     initial_state = REASONING_BUDGET_IDLE);
 
-common_reasoning_budget_state common_reasoning_budget_get_state(const struct llama_sampler * smpl);
+LLAMA_API common_reasoning_budget_state common_reasoning_budget_get_state(const struct llama_sampler * smpl);
 
 // The end sequence that transitioned the sampler to DONE, or nullptr if none
 // was recorded. Cleared when a new start sequence re-arms the sampler.
-const llama_tokens * common_reasoning_budget_get_end_match(const struct llama_sampler * smpl);
+LLAMA_API const std::vector<llama_token> * common_reasoning_budget_get_end_match(const struct llama_sampler * smpl);
 
 // Manually transition the reasoning budget sampler into the FORCING state.
 // Returns true if the transition occurred.
-bool common_reasoning_budget_force(struct llama_sampler * smpl);
+LLAMA_API bool common_reasoning_budget_force(struct llama_sampler * smpl);

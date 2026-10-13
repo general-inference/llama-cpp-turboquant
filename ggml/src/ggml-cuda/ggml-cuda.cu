@@ -10,6 +10,7 @@
 #include "ggml-cuda/argmax.cuh"
 #include "ggml-cuda/argsort.cuh"
 #include "ggml-cuda/binbcast.cuh"
+#include "ggml-cuda/cachegen.cuh"
 #include "ggml-cuda/clamp.cuh"
 #include "ggml-cuda/col2im-1d.cuh"
 #include "ggml-cuda/concat.cuh"
@@ -86,6 +87,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -5660,7 +5662,12 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                 return false;
             }
         case GGML_OP_DUP:
-                return true;
+            {
+                // Integer DUP offload can fail while capturing stable CUDA graphs.
+                // Keep these tensors on the host until the upstream graph path is safe.
+                ggml_type src0_type = op->src[0]->type;
+                return src0_type != GGML_TYPE_I32 && src0_type != GGML_TYPE_I16;
+            } break;
         case GGML_OP_ARGMAX:
         case GGML_OP_COUNT_EQUAL:
             return true;
@@ -6016,7 +6023,12 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t 
     #endif
 
     #ifdef GGML_CUDA_FA_QUANTS
-        features.push_back({ "FA_QUANTS", GGML_CUDA_FA_QUANTS });
+        static const std::string fa_quants = [] {
+            std::string value = STRINGIFY(GGML_CUDA_FA_QUANTS);
+            std::replace(value.begin(), value.end(), ':', ',');
+            return value;
+        }();
+        features.push_back({ "FA_QUANTS", fa_quants.c_str() });
     #endif
 
     {
@@ -6042,6 +6054,329 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t 
     GGML_UNUSED(reg);
 }
 
+#if !defined(GGML_USE_MUSA)
+
+struct ggml_cuda_cachegen_payload_copy {
+    const uint8_t * source = nullptr;
+    uint32_t destination_offset = 0;
+    uint32_t bytes = 0;
+};
+
+struct ggml_cuda_cachegen_staged_job {
+    int physical_device = -1;
+    uint8_t * dst = nullptr;
+    uint32_t channels = 0;
+    uint32_t element_bytes = 0;
+    uint64_t token_stride = 0;
+    uint64_t channel_stride = 0;
+    size_t payload_bytes = 0;
+    std::vector<ggml_cuda_cachegen_payload_copy> payload_copies;
+    std::vector<ggml_cuda_cachegen_tile> tiles;
+    std::vector<uint32_t> prefixes;
+    std::vector<uint32_t> cells;
+    uint8_t * payload_device = nullptr;
+    ggml_cuda_cachegen_tile * tiles_device = nullptr;
+    uint32_t * prefixes_device = nullptr;
+    uint32_t * cells_device = nullptr;
+};
+
+static bool ggml_cuda_cachegen_error(char * error, size_t capacity, const char * message) {
+    if (error != nullptr && capacity > 0) {
+        snprintf(error, capacity, "%s", message);
+    }
+    return false;
+}
+
+static bool ggml_cuda_cachegen_cuda_error(
+        char * error, size_t capacity, const char * operation, cudaError_t status) {
+    if (error != nullptr && capacity > 0) {
+        snprintf(error, capacity, "%s: %s", operation, cudaGetErrorString(status));
+    }
+    return false;
+}
+
+static cudaError_t ggml_cuda_cachegen_synchronize(const std::vector<ggml_cuda_cachegen_staged_job> & jobs) {
+    std::vector<int> devices;
+    for (const ggml_cuda_cachegen_staged_job & job : jobs) {
+        if (std::find(devices.begin(), devices.end(), job.physical_device) != devices.end()) {
+            continue;
+        }
+        const cudaError_t set_status = cudaSetDevice(job.physical_device);
+        if (set_status != cudaSuccess) {
+            return set_status;
+        }
+        const cudaError_t sync_status = cudaStreamSynchronize(cudaStreamPerThread);
+        if (sync_status != cudaSuccess) {
+            return sync_status;
+        }
+        devices.push_back(job.physical_device);
+    }
+    return cudaSuccess;
+}
+
+static cudaError_t ggml_cuda_cachegen_release(std::vector<ggml_cuda_cachegen_staged_job> & jobs) {
+    cudaError_t first_error = cudaSuccess;
+    for (ggml_cuda_cachegen_staged_job & job : jobs) {
+        cudaError_t status = cudaSetDevice(job.physical_device);
+        if (status != cudaSuccess) {
+            if (first_error == cudaSuccess) {
+                first_error = status;
+            }
+            continue;
+        }
+        void * allocations[] = { job.payload_device, job.tiles_device, job.prefixes_device, job.cells_device };
+        for (void * allocation : allocations) {
+            if (allocation == nullptr) {
+                continue;
+            }
+            status = cudaFree(allocation);
+            if (status != cudaSuccess && first_error == cudaSuccess) {
+                first_error = status;
+            }
+        }
+        job.payload_device = nullptr;
+        job.tiles_device = nullptr;
+        job.prefixes_device = nullptr;
+        job.cells_device = nullptr;
+    }
+    return first_error;
+}
+
+static bool ggml_cuda_cachegen_decode(
+        const struct ggml_backend_cachegen_job * jobs,
+        size_t job_count,
+        char * error,
+        size_t error_capacity) {
+    if (jobs == nullptr || job_count == 0) {
+        return ggml_cuda_cachegen_error(error, error_capacity, "CUDA/HIP CacheGen jobs are required");
+    }
+
+    std::vector<ggml_cuda_cachegen_staged_job> staged_jobs;
+    try {
+        staged_jobs.reserve(job_count);
+        for (size_t job_index = 0; job_index < job_count; ++job_index) {
+            const struct ggml_backend_cachegen_job * job = &jobs[job_index];
+            const bool quantized = job->dst != nullptr &&
+                (job->dst->type == GGML_TYPE_Q8_0 || job->dst->type == GGML_TYPE_Q4_0);
+            if (job->dst == nullptr || job->dst->data == nullptr || job->dst->buffer == nullptr ||
+                    !ggml_backend_buffer_is_cuda(job->dst->buffer) || job->dst->buffer->context == nullptr ||
+                    job->tiles == nullptr || job->tile_count == 0 || job->tile_count > UINT32_MAX ||
+                    job->cells == nullptr || job->cell_count == 0 || job->cell_count > UINT32_MAX ||
+                    job->cell_count > SIZE_MAX / sizeof(uint32_t) || job->channels == 0 ||
+                    job->channels == UINT32_MAX ||
+                    (job->dst->type != GGML_TYPE_F16 && job->dst->type != GGML_TYPE_F32 &&
+                     job->dst->type != GGML_TYPE_Q8_0 && job->dst->type != GGML_TYPE_Q4_0) ||
+                    (quantized && job->channels % 32 != 0) ||
+                    job->token_stride == 0 || job->channel_stride == 0 ||
+                    job->token_stride % ggml_type_size(job->dst->type) != 0 ||
+                    job->channel_stride % ggml_type_size(job->dst->type) != 0) {
+                return ggml_cuda_cachegen_error(error, error_capacity, "invalid CUDA/HIP CacheGen job");
+            }
+
+            staged_jobs.emplace_back();
+            ggml_cuda_cachegen_staged_job & staged = staged_jobs.back();
+            auto * buffer_context = static_cast<ggml_backend_cuda_buffer_context *>(job->dst->buffer->context);
+            staged.physical_device = ggml_cuda_get_physical_device(buffer_context->device);
+            staged.dst = static_cast<uint8_t *>(job->dst->data);
+            staged.channels = job->channels;
+            staged.element_bytes = ggml_type_size(job->dst->type);
+            staged.token_stride = job->token_stride;
+            staged.channel_stride = job->channel_stride;
+            staged.cells.assign(job->cells, job->cells + job->cell_count);
+
+            uint64_t max_cell = 0;
+            for (uint32_t cell : staged.cells) {
+                max_cell = std::max(max_cell, static_cast<uint64_t>(cell));
+            }
+            const uint64_t output_units = quantized ? job->channels / 32 : job->channels;
+            const uint64_t max_channel = output_units - 1;
+            if (max_cell > (UINT64_MAX - staged.element_bytes) / job->token_stride ||
+                    max_channel > (UINT64_MAX - max_cell * job->token_stride - staged.element_bytes) /
+                        job->channel_stride ||
+                    max_cell * job->token_stride + max_channel * job->channel_stride + staged.element_bytes >
+                        ggml_nbytes(job->dst)) {
+                return ggml_cuda_cachegen_error(
+                    error, error_capacity, "CUDA/HIP CacheGen destination geometry is out of bounds");
+            }
+
+            if (job->tile_count > SIZE_MAX / sizeof(ggml_cuda_cachegen_tile)) {
+                return ggml_cuda_cachegen_error(error, error_capacity, "CUDA/HIP CacheGen tile geometry overflows");
+            }
+            staged.tiles.reserve(job->tile_count);
+            staged.payload_copies.reserve(job->tile_count);
+            for (size_t tile_index = 0; tile_index < job->tile_count; ++tile_index) {
+                const struct ggml_backend_cachegen_tile * tile = &job->tiles[tile_index];
+                if (tile->payload == nullptr || tile->payload_bytes < 16 || tile->payload_bytes > UINT32_MAX ||
+                        tile->token_count == 0 || tile->token_count > 256 || tile->token_offset > job->cell_count ||
+                        tile->token_count > job->cell_count - tile->token_offset ||
+                        staged.payload_bytes > UINT32_MAX - 3 ||
+                        staged.prefixes.size() > UINT32_MAX - (static_cast<size_t>(job->channels) + 1)) {
+                    return ggml_cuda_cachegen_error(
+                        error, error_capacity, "CUDA/HIP CacheGen tile exceeds bounded geometry");
+                }
+
+                const size_t aligned_payload_size = (staged.payload_bytes + 3) & ~size_t(3);
+                if (tile->payload_bytes > UINT32_MAX - aligned_payload_size) {
+                    return ggml_cuda_cachegen_error(
+                        error, error_capacity, "CUDA/HIP CacheGen payload offsets overflow");
+                }
+                const uint8_t * payload = static_cast<const uint8_t *>(tile->payload);
+                const bool packed = memcmp(payload, "LCG2", 4) == 0;
+                const uint32_t bins = payload[4];
+                const uint32_t expected_bits = bins == 16 ? 4 : 5;
+                const uint32_t header_rows = static_cast<uint32_t>(payload[6]) |
+                    static_cast<uint32_t>(payload[7]) << 8;
+                const uint32_t header_channels = static_cast<uint32_t>(payload[8]) |
+                    static_cast<uint32_t>(payload[9]) << 8 | static_cast<uint32_t>(payload[10]) << 16 |
+                    static_cast<uint32_t>(payload[11]) << 24;
+                if ((!packed && memcmp(payload, "LCG1", 4) != 0) || (bins != 16 && bins != 32) ||
+                        (packed ? payload[5] != expected_bits : payload[5] != 0) ||
+                        header_rows != tile->token_count || header_channels != job->channels) {
+                    return ggml_cuda_cachegen_error(
+                        error, error_capacity, "CUDA/HIP CacheGen tile header is inconsistent");
+                }
+                const ggml_cuda_cachegen_tile encoded_tile = {
+                    static_cast<uint32_t>(aligned_payload_size),
+                    static_cast<uint32_t>(staged.prefixes.size()),
+                    tile->token_offset,
+                    tile->token_count,
+                };
+                const uint32_t declared_stream_bytes = static_cast<uint32_t>(payload[12]) |
+                    static_cast<uint32_t>(payload[13]) << 8 | static_cast<uint32_t>(payload[14]) << 16 |
+                    static_cast<uint32_t>(payload[15]) << 24;
+                staged.prefixes.push_back(0);
+                if (packed) {
+                    const uint64_t values = static_cast<uint64_t>(tile->token_count) * job->channels;
+                    const uint64_t expected_stream_bytes = (values * expected_bits + 7) / 8;
+                    const size_t streams_offset = 16 + static_cast<size_t>(tile->token_count) * sizeof(float);
+                    if (expected_stream_bytes > UINT32_MAX || streams_offset > tile->payload_bytes ||
+                            declared_stream_bytes != expected_stream_bytes ||
+                            declared_stream_bytes != tile->payload_bytes - streams_offset) {
+                        return ggml_cuda_cachegen_error(
+                            error, error_capacity, "CUDA/HIP CacheGen packed length is inconsistent");
+                    }
+                } else {
+                    const uint64_t streams_offset_u64 = 16ull + static_cast<uint64_t>(tile->token_count) * sizeof(float) +
+                        static_cast<uint64_t>(job->channels) * 33 * sizeof(uint16_t) +
+                        static_cast<uint64_t>(job->channels) * sizeof(uint16_t);
+                    if (streams_offset_u64 > tile->payload_bytes || streams_offset_u64 > UINT32_MAX) {
+                        return ggml_cuda_cachegen_error(
+                            error, error_capacity, "CUDA/HIP CacheGen tile metadata is truncated");
+                    }
+                    const size_t lengths_offset = static_cast<size_t>(streams_offset_u64) -
+                        static_cast<size_t>(job->channels) * sizeof(uint16_t);
+                    const size_t streams_offset = static_cast<size_t>(streams_offset_u64);
+                    uint32_t prefix = 0;
+                    for (uint32_t channel = 0; channel < job->channels; ++channel) {
+                        const size_t offset = lengths_offset + static_cast<size_t>(channel) * sizeof(uint16_t);
+                        const uint32_t length = static_cast<uint32_t>(payload[offset]) |
+                            static_cast<uint32_t>(payload[offset + 1]) << 8;
+                        if (prefix > UINT32_MAX - length) {
+                            return ggml_cuda_cachegen_error(
+                                error, error_capacity, "CUDA/HIP CacheGen stream offsets overflow");
+                        }
+                        prefix += length;
+                        staged.prefixes.push_back(prefix);
+                    }
+                    if (prefix != declared_stream_bytes || prefix != tile->payload_bytes - streams_offset) {
+                        return ggml_cuda_cachegen_error(
+                            error, error_capacity, "CUDA/HIP CacheGen stream length is inconsistent");
+                    }
+                }
+                staged.tiles.push_back(encoded_tile);
+                staged.payload_copies.push_back({
+                    payload,
+                    static_cast<uint32_t>(aligned_payload_size),
+                    static_cast<uint32_t>(tile->payload_bytes),
+                });
+                staged.payload_bytes = aligned_payload_size + tile->payload_bytes;
+            }
+        }
+    } catch (const std::bad_alloc &) {
+        return ggml_cuda_cachegen_error(error, error_capacity, "CUDA/HIP CacheGen host staging allocation failed");
+    }
+
+    int original_device = -1;
+    cudaError_t status = cudaGetDevice(&original_device);
+    if (status != cudaSuccess) {
+        return ggml_cuda_cachegen_cuda_error(error, error_capacity, "CUDA/HIP CacheGen device query failed", status);
+    }
+
+    const auto fail = [&](const char * operation, cudaError_t failure) {
+        (void) ggml_cuda_cachegen_synchronize(staged_jobs);
+        (void) ggml_cuda_cachegen_release(staged_jobs);
+        (void) cudaSetDevice(original_device);
+        return ggml_cuda_cachegen_cuda_error(error, error_capacity, operation, failure);
+    };
+
+    for (ggml_cuda_cachegen_staged_job & job : staged_jobs) {
+        status = cudaSetDevice(job.physical_device);
+        if (status != cudaSuccess) {
+            return fail("CUDA/HIP CacheGen device selection failed", status);
+        }
+#define GGML_CACHEGEN_CUDA_CALL(call, operation) \
+        do { \
+            status = (call); \
+            if (status != cudaSuccess) { \
+                return fail((operation), status); \
+            } \
+        } while (0)
+        GGML_CACHEGEN_CUDA_CALL(cudaMalloc(reinterpret_cast<void **>(&job.payload_device), job.payload_bytes),
+                                "CUDA/HIP CacheGen payload allocation failed");
+        GGML_CACHEGEN_CUDA_CALL(cudaMalloc(reinterpret_cast<void **>(&job.tiles_device),
+                                           job.tiles.size() * sizeof(ggml_cuda_cachegen_tile)),
+                                "CUDA/HIP CacheGen tile allocation failed");
+        GGML_CACHEGEN_CUDA_CALL(cudaMalloc(reinterpret_cast<void **>(&job.prefixes_device),
+                                           job.prefixes.size() * sizeof(uint32_t)),
+                                "CUDA/HIP CacheGen prefix allocation failed");
+        GGML_CACHEGEN_CUDA_CALL(cudaMalloc(reinterpret_cast<void **>(&job.cells_device),
+                                           job.cells.size() * sizeof(uint32_t)),
+                                "CUDA/HIP CacheGen cell allocation failed");
+        for (const ggml_cuda_cachegen_payload_copy & copy : job.payload_copies) {
+            GGML_CACHEGEN_CUDA_CALL(
+                cudaMemcpyAsync(job.payload_device + copy.destination_offset, copy.source, copy.bytes,
+                                cudaMemcpyHostToDevice, cudaStreamPerThread),
+                "CUDA/HIP CacheGen payload upload failed");
+        }
+        GGML_CACHEGEN_CUDA_CALL(cudaMemcpyAsync(job.tiles_device, job.tiles.data(),
+                                                job.tiles.size() * sizeof(ggml_cuda_cachegen_tile),
+                                                cudaMemcpyHostToDevice, cudaStreamPerThread),
+                                "CUDA/HIP CacheGen tile upload failed");
+        GGML_CACHEGEN_CUDA_CALL(cudaMemcpyAsync(job.prefixes_device, job.prefixes.data(),
+                                                job.prefixes.size() * sizeof(uint32_t),
+                                                cudaMemcpyHostToDevice, cudaStreamPerThread),
+                                "CUDA/HIP CacheGen prefix upload failed");
+        GGML_CACHEGEN_CUDA_CALL(cudaMemcpyAsync(job.cells_device, job.cells.data(),
+                                                job.cells.size() * sizeof(uint32_t),
+                                                cudaMemcpyHostToDevice, cudaStreamPerThread),
+                                "CUDA/HIP CacheGen cell upload failed");
+        GGML_CACHEGEN_CUDA_CALL(
+            ggml_cuda_cachegen_decode_launch(job.payload_device, job.tiles_device, job.prefixes_device,
+                                             job.cells_device, job.dst, job.channels,
+                                             static_cast<uint32_t>(job.tiles.size()), job.token_stride,
+                                             job.channel_stride, job.element_bytes, cudaStreamPerThread),
+            "CUDA/HIP CacheGen kernel launch failed");
+#undef GGML_CACHEGEN_CUDA_CALL
+    }
+
+    status = ggml_cuda_cachegen_synchronize(staged_jobs);
+    if (status != cudaSuccess) {
+        return fail("CUDA/HIP CacheGen kernel execution failed", status);
+    }
+    status = ggml_cuda_cachegen_release(staged_jobs);
+    if (status != cudaSuccess) {
+        (void) cudaSetDevice(original_device);
+        return ggml_cuda_cachegen_cuda_error(error, error_capacity, "CUDA/HIP CacheGen staging release failed", status);
+    }
+    status = cudaSetDevice(original_device);
+    if (status != cudaSuccess) {
+        return ggml_cuda_cachegen_cuda_error(error, error_capacity, "CUDA/HIP CacheGen device restore failed", status);
+    }
+    return true;
+}
+
+#endif // !defined(GGML_USE_MUSA)
+
 static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, const char * name) {
     GGML_UNUSED(reg);
     if (strcmp(name, "ggml_backend_comm_init") == 0) {
@@ -6062,6 +6397,11 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
     if (strcmp(name, "ggml_backend_get_features") == 0) {
         return (void *)ggml_backend_cuda_get_features;
     }
+#if !defined(GGML_USE_MUSA)
+    if (strcmp(name, "ggml_backend_cachegen_decode") == 0) {
+        return (void *)ggml_cuda_cachegen_decode;
+    }
+#endif // !defined(GGML_USE_MUSA)
     return nullptr;
 }
 

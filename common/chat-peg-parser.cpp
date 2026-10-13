@@ -386,11 +386,12 @@ void common_chat_peg_mapper::map(const common_peg_ast_node & node) {
     }
 
     if (is_arg_name && current_tool) {
+        const std::string arg_name(trim(node.text));
         std::string arg_entry;
         if (arg_count > 0) {
             arg_entry = ",";
         }
-        arg_entry += ordered_json(trim(node.text)).dump() + ":";
+        arg_entry += ordered_json(arg_name).dump() + ":";
         ++arg_count;
 
         auto & target = args_target();
@@ -672,10 +673,10 @@ common_peg_parser common_chat_peg_builder::build_json_tools_function_is_key(
         // Arguments — either wrapped in args_key or parsed directly
         common_peg_parser args_parser = eps();
         if (args_key.empty()) {
-            args_parser = tool_args(schema(json(), "tool-" + std::to_string(i) + "-schema", params));
+            args_parser = tool_args(schema(json_object(), "tool-" + std::to_string(i) + "-schema", params));
         } else {
             args_parser = literal("\"" + effective_args_key + "\"") + space() + literal(":") + space() +
-                          tool_args(schema(json(), "tool-" + std::to_string(i) + "-schema", params));
+                          tool_args(schema(json_object(), "tool-" + std::to_string(i) + "-schema", params));
         }
         inner_fields.push_back(args_parser);
 
@@ -737,7 +738,7 @@ common_peg_parser common_chat_peg_builder::build_json_tools_nested_keys(
         auto nested_name = literal("\"" + nested_name_field + "\"") + space() + literal(":") + space() +
                           atomic(literal("\"") + tool_name(literal(name)) + literal("\""));
         auto nested_args = literal("\"" + nested_args_field + "\"") + space() + literal(":") + space() +
-                          tool_args(schema(json(), "tool-" + std::to_string(i) + "-schema", params));
+                          tool_args(schema(json_object(), "tool-" + std::to_string(i) + "-schema", params));
 
         auto nested_object = literal("{") + space() +
                             nested_name + space() + literal(",") + space() +
@@ -793,7 +794,9 @@ common_peg_parser common_chat_peg_builder::build_json_tools_flat_keys(
 
     auto tool_choices    = choice();
     auto name_key_parser = literal("\"" + effective_name_key + "\"");
-    auto args_key_parser = literal("\"" + effective_args_key + "\"");
+    auto args_key_parser = effective_args_key == "arguments"
+                               ? choice({ literal("\"arguments\""), literal("\"args\"") })
+                               : literal("\"" + effective_args_key + "\"");
 
     for (size_t i = 0; i < tools.size(); i++) {
         const auto & tool_def = tools[i];
@@ -807,7 +810,7 @@ common_peg_parser common_chat_peg_builder::build_json_tools_flat_keys(
         auto tool_name_ = name_key_parser + space() + literal(":") + space() +
                          atomic(literal("\"") + tool_name(literal(name)) + literal("\""));
         auto tool_args_ = args_key_parser + space() + literal(":") + space() +
-                         tool_args(schema(json(), "tool-" + std::to_string(i) + "-schema", params));
+                         tool_args(schema(json_object(), "tool-" + std::to_string(i) + "-schema", params));
 
         // Build ID parsers if keys are provided
         common_peg_parser id_parser = eps();

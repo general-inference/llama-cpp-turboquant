@@ -117,6 +117,22 @@ MTMD_API int32_t mtmd_helper_eval_chunk_single(mtmd_context * ctx,
                                                bool logits_last,
                                                llama_pos * new_n_past);
 
+// Called after each bounded decode while its graph outputs are still live.
+// A nonzero result stops evaluation and is returned to the caller.
+typedef int32_t (*mtmd_helper_chunk_decode_callback)(int32_t n_tokens, void * user_data);
+
+/** @brief Evaluate a media/text chunk and capture every native microbatch before reuse. */
+MTMD_API int32_t mtmd_helper_eval_chunk_single_with_callback(mtmd_context *                    ctx,
+                                                             struct llama_context *            lctx,
+                                                             const mtmd_input_chunk *          chunk,
+                                                             llama_pos                         n_past,
+                                                             llama_seq_id                      seq_id,
+                                                             int32_t                           n_batch,
+                                                             bool                              logits_last,
+                                                             llama_pos *                       new_n_past,
+                                                             mtmd_helper_chunk_decode_callback callback,
+                                                             void *                            user_data);
+
 // one decoded sub-batch of embeddings, passed to mtmd_helper_post_decode_callback
 struct mtmd_helper_embd_batch {
     int32_t n_tokens;
