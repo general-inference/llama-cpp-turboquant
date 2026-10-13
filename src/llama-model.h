@@ -859,6 +859,18 @@ struct llama_model {
     uint32_t n_gpu_layers() const;
     llama_split_mode split_mode() const;
 
+    bool tensor_source_location(
+            const char * name,
+            uint16_t & split_no,
+            size_t & data_offset,
+            size_t & stored_length) const;
+
+    // Physical GGUF metadata, before loader-approved logical reshaping.
+    bool tensor_source_metadata(
+            const char * name,
+            ggml_type & type,
+            std::vector<int64_t> & dimensions) const;
+
     std::map<ggml_backend_buffer_type_t, size_t> memory_breakdown() const;
 
     // total number of parameters in the model
@@ -880,7 +892,10 @@ struct llama_model {
 
     ggml_tensor * get_rope_factors(const llama_cparams & cparams, int il) const;
 
-    llama_memory_i * create_memory(const llama_memory_params & params, const llama_cparams & cparams) const;
+    llama_memory_i * create_memory(
+            const llama_memory_params & params,
+            const llama_cparams & cparams,
+            const skippy_graph_selection & stage_selection) const;
 
     ggml_cgraph * build_graph(const llm_graph_params & params) const;
 

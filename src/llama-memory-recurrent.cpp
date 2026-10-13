@@ -26,7 +26,8 @@ llama_memory_recurrent::llama_memory_recurrent(
                  uint32_t   n_seq_max,
                  uint32_t   n_rs_seq,
     const layer_filter_cb & filter) : hparams(model.hparams), n_seq_max(n_seq_max) {
-    const int32_t n_layer = hparams.n_layer();
+    // MTP layers append recurrent state beyond the trunk layer count.
+    const int32_t n_layer = hparams.n_layer_all;
 
     head = 0;
     size = mem_size;
@@ -73,10 +74,41 @@ llama_memory_recurrent::llama_memory_recurrent(
     r_l.resize(n_layer);
     s_l.resize(n_layer);
     p_l.resize(n_layer);
+    graph_r_l.resize(n_layer);
+    graph_s_l.resize(n_layer);
+    graph_p_l.resize(n_layer);
+
+    const uint32_t n_rows = mem_size * (1 + n_rs_seq);
+
+    auto graph_ctx_get = [&]() -> ggml_context * {
+        if (!graph_ctx) {
+            ggml_init_params params = {
+                /*.mem_size   =*/ size_t((hparams.ple_conv_state() > 0 ? 3u : 2u)*n_layer*ggml_tensor_overhead()),
+                /*.mem_buffer =*/ NULL,
+                /*.no_alloc   =*/ true,
+            };
+            graph_ctx.reset(ggml_init(params));
+            if (!graph_ctx) {
+                throw std::runtime_error("failed to create graph-only context for rs cache");
+            }
+        }
+        return graph_ctx.get();
+    };
 
     for (int i = 0; i < n_layer; i++) {
         if (filter && !filter(i)) {
             LLAMA_LOG_DEBUG("%s: layer %3d: skipped\n", __func__, i);
+
+            ggml_context * ctx = graph_ctx_get();
+            graph_r_l[i] = ggml_new_tensor_2d(ctx, type_r, hparams.n_embd_r(), n_rows);
+            graph_s_l[i] = ggml_new_tensor_2d(ctx, type_s, hparams.n_embd_s(), n_rows);
+            ggml_format_name(graph_r_l[i], "cache_r_l%d", i);
+            ggml_format_name(graph_s_l[i], "cache_s_l%d", i);
+
+            if (hparams.ple_conv_state() > 0 && hparams.is_ple(i)) {
+                graph_p_l[i] = ggml_new_tensor_2d(ctx, type_r, hparams.ple_conv_state(), n_rows);
+                ggml_format_name(graph_p_l[i], "cache_ple_r_l%d", i);
+            }
             continue;
         }
 
@@ -98,7 +130,6 @@ llama_memory_recurrent::llama_memory_recurrent(
             throw std::runtime_error("failed to create ggml context for rs cache");
         }
 
-        const uint32_t n_rows = mem_size * (1 + n_rs_seq);
         ggml_tensor * r = ggml_new_tensor_2d(ctx, type_r, hparams.n_embd_r(), n_rows);
         ggml_tensor * s = ggml_new_tensor_2d(ctx, type_s, hparams.n_embd_s(), n_rows);
         ggml_format_name(r, "cache_r_l%d", i);
@@ -116,7 +147,17 @@ llama_memory_recurrent::llama_memory_recurrent(
 
     // allocate tensors and initialize the buffers to avoid NaNs in the padding
     for (auto & [buft, ctx] : ctx_map) {
-        ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx.get(), buft);
+        ggml_backend_buffer_t buf;
+        if (hparams.no_alloc) {
+            buf = ggml_backend_buft_alloc_buffer(buft, /*size =*/ 0);
+            for (ggml_tensor * tensor = ggml_get_first_tensor(ctx.get());
+                    tensor != nullptr;
+                    tensor = ggml_get_next_tensor(ctx.get(), tensor)) {
+                tensor->buffer = buf;
+            }
+        } else {
+            buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx.get(), buft);
+        }
         if (!buf) {
             throw std::runtime_error("failed to allocate buffer for rs cache");
         }
@@ -435,8 +476,14 @@ void llama_memory_recurrent::set_rs_idx(llama_seq_id seq_id, uint32_t idx) {
 
 std::map<ggml_backend_buffer_type_t, size_t> llama_memory_recurrent::memory_breakdown() const {
     std::map<ggml_backend_buffer_type_t, size_t> ret;
-    for (const auto & [_, buf] : ctxs_bufs) {
-        ret[ggml_backend_buffer_get_type(buf.get())] += ggml_backend_buffer_get_size(buf.get());
+    for (const auto & [ctx, buf] : ctxs_bufs) {
+        ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(buf.get());
+        if (hparams.no_alloc) {
+            GGML_ASSERT(ggml_backend_buffer_get_base(buf.get()) == nullptr);
+            ret[buft] += ggml_backend_alloc_ctx_tensors_from_buft_size(ctx.get(), buft);
+        } else {
+            ret[buft] += ggml_backend_buffer_get_size(buf.get());
+        }
     }
     return ret;
 }
@@ -918,7 +965,7 @@ void llama_memory_recurrent::state_write_meta(llama_io_write_i & io, const std::
 
 void llama_memory_recurrent::state_write_data(llama_io_write_i & io, const std::vector<std::pair<uint32_t, uint32_t>> & cell_ranges) const {
     const uint32_t s_trans = 0;
-    const uint32_t n_layer = hparams.n_layer();
+    const uint32_t n_layer = hparams.n_layer_all;
 
     io.write(&s_trans, sizeof(s_trans));
     io.write(&n_layer, sizeof(n_layer));
@@ -1118,8 +1165,8 @@ bool llama_memory_recurrent::state_read_data(llama_io_read_i & io, uint32_t cell
     io.read(&s_trans, sizeof(s_trans));
     io.read(&n_layer, sizeof(n_layer));
 
-    if (n_layer != hparams.n_layer()) {
-        LLAMA_LOG_ERROR("%s: mismatched layer count (%u instead of %u)\n", __func__, n_layer, hparams.n_layer());
+    if (n_layer != hparams.n_layer_all) {
+        LLAMA_LOG_ERROR("%s: mismatched layer count (%u instead of %u)\n", __func__, n_layer, hparams.n_layer_all);
         return false;
     }
     if (cell_count > size) {
@@ -1354,15 +1401,15 @@ uint32_t llama_memory_recurrent_context::get_size() const {
 }
 
 ggml_tensor * llama_memory_recurrent_context::get_r_l(int32_t il) const {
-    return mem->r_l[il];
+    return mem->r_l[il] != nullptr ? mem->r_l[il] : mem->graph_r_l[il];
 }
 
 ggml_tensor * llama_memory_recurrent_context::get_s_l(int32_t il) const {
-    return mem->s_l[il];
+    return mem->s_l[il] != nullptr ? mem->s_l[il] : mem->graph_s_l[il];
 }
 
 ggml_tensor * llama_memory_recurrent_context::get_p_l(int32_t il) const {
-    return mem->p_l[il];
+    return mem->p_l[il] != nullptr ? mem->p_l[il] : mem->graph_p_l[il];
 }
 
 int32_t llama_memory_recurrent_context::s_copy(int i) const {

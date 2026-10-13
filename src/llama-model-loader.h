@@ -14,10 +14,36 @@
 #include <map>
 #include <set>
 #include <stdexcept>
+#include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 // lists of buffer types used for each layer
 using buft_list_t = std::vector<std::pair<ggml_backend_dev_t, ggml_backend_buffer_type_t>>;
+
+struct llama_model_loader_stage_selection {
+    int32_t layer_start = 0;
+    int32_t layer_end = 0;
+    std::unordered_set<std::string> resident_tensor_names;
+};
+
+struct llama_model * llama_model_init_from_user_with_selection(
+        struct gguf_context * metadata,
+        llama_model_set_tensor_data_t set_tensor_data,
+        void * set_tensor_data_ud,
+        struct llama_model_params params,
+        const llama_model_loader_stage_selection * selection);
+
+struct llama_model * llama_model_load_from_file_with_selection(
+        const char * path_model,
+        struct llama_model_params params,
+        const llama_model_loader_stage_selection * selection);
+
+struct llama_model * llama_model_load_from_parts_with_selection(
+        const char * const * paths,
+        size_t n_paths,
+        struct llama_model_params params,
+        const llama_model_loader_stage_selection * selection);
 
 enum llama_fver {
     GGUF_FILE_VERSION_V1 = 1,
@@ -35,14 +61,20 @@ struct llama_model_loader {
 
         ggml_tensor * tensor;
 
-        llama_tensor_weight(const llama_file * file, uint16_t idx, const struct gguf_context * gguf_ctx, ggml_tensor * tensor) : idx(idx), tensor(tensor) {
+        llama_tensor_weight(const llama_file * file, uint16_t idx, const struct gguf_context * gguf_ctx, ggml_tensor * tensor, bool no_alloc) : idx(idx), tensor(tensor) {
             const int tensor_idx = gguf_find_tensor(gguf_ctx,  ggml_get_name(tensor));
             if (tensor_idx < 0) {
                 throw std::runtime_error(format("tensor '%s' not found in the model", ggml_get_name(tensor)));
             }
 
             offs = gguf_get_data_offset(gguf_ctx) + gguf_get_tensor_offset(gguf_ctx, tensor_idx);
-            if (offs + ggml_nbytes(tensor) < offs || offs + ggml_nbytes(tensor) > file->size()) {
+            const int metadata_only_key = gguf_find_key(gguf_ctx, "skippy.package.metadata_only");
+            const bool metadata_only = no_alloc &&
+                    metadata_only_key >= 0 &&
+                    gguf_get_kv_type(gguf_ctx, metadata_only_key) == GGUF_TYPE_BOOL &&
+                    gguf_get_val_bool(gguf_ctx, metadata_only_key);
+            if (offs + ggml_nbytes(tensor) < offs ||
+                    (!metadata_only && offs + ggml_nbytes(tensor) > file->size())) {
                 throw std::runtime_error(format("tensor '%s' data is not within the file bounds, model is corrupted or incomplete", ggml_get_name(tensor)));
             }
         }
@@ -123,6 +155,10 @@ struct llama_model_loader {
 
     std::map<std::string, llama_tensor_weight, weight_name_comparer> weights_map;
     std::unordered_map<std::string, llama_model_kv_override> kv_overrides;
+    std::unordered_set<std::string> skippy_counted_stage_tensors;
+    std::unordered_set<std::string> skippy_requested_resident_tensors;
+    llama_model_loader_stage_selection stage_selection;
+    bool has_stage_selection = false;
     const llama_model_tensor_buft_override * tensor_buft_overrides;
 
     gguf_context_ptr metadata_ptr;
@@ -149,10 +185,17 @@ struct llama_model_loader {
     struct ctx_key {
         ggml_backend_buffer_type_t buft;
         bool lazy;
+        // Non-resident tensors retain metadata so the ordinary whole-model
+        // builder can construct the admitted graph, but never receive a
+        // backend allocation or payload read.
+        bool resident;
     };
 
     struct ctx_key_comparator {
         bool operator()(const ctx_key & lhs, const ctx_key & rhs) const {
+            if (lhs.resident != rhs.resident) {
+                return lhs.resident < rhs.resident;
+            }
             if (lhs.lazy != rhs.lazy) {
                 return lhs.lazy < rhs.lazy;
             }
@@ -175,13 +218,19 @@ struct llama_model_loader {
         void * set_tensor_data_ud,
         const std::string & fname,
         std::vector<std::string> & splits, // optional, only need if the split does not follow naming scheme
+        bool ordered_parts,
         FILE * file,
         llama_load_mode load_mode,
         bool check_tensors,
         bool no_alloc,
         bool load_mtp,
         const llama_model_kv_override * param_overrides_p,
-        const llama_model_tensor_buft_override * param_tensor_buft_overrides_p);
+        const llama_model_tensor_buft_override * param_tensor_buft_overrides_p,
+        const llama_model_loader_stage_selection * stage_selection = nullptr);
+
+    const llama_model_loader_stage_selection * get_stage_selection() const {
+        return has_stage_selection ? &stage_selection : nullptr;
+    }
 
     template<typename T>
     typename std::enable_if<std::is_integral<T>::value, bool>::type

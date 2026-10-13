@@ -51,6 +51,7 @@ public:
 
         for (uint32_t s = 0; s < LLAMA_MAX_SEQ; ++s) {
             seq_pos[s].clear();
+            seq_pos_index_mismatch[s] = 0;
         }
     }
 
@@ -103,24 +104,32 @@ public:
     }
 
     // move cell isrc to idst (used during defrag)
-    //void mv(uint32_t isrc, uint32_t idst) {
-    //    assert(isrc < pos.size());
-    //    assert(idst < pos.size());
+    void mv(uint32_t isrc, uint32_t idst) {
+        assert(isrc < pos.size());
+        assert(idst < pos.size());
+        assert(isrc != idst);
 
-    //    assert(pos[idst] == -1);
-    //    assert(pos[isrc] != -1);
+        assert(pos[idst] == -1);
+        assert(seq[idst].none());
+        assert(pos[isrc] != -1);
 
-    //    pos  [idst] = pos  [isrc];
-    //    shift[idst] = shift[isrc];
-    //    seq  [idst] = seq  [isrc];
+        seq_pos_rm(isrc);
 
-    //    pos  [isrc] = -1;
-    //    shift[isrc] =  0;
-    //    seq  [isrc].reset();
+        pos  [idst] = pos  [isrc];
+        ext  [idst] = ext  [isrc];
+        shift[idst] = shift[isrc];
+        seq  [idst] = seq  [isrc];
 
-    //    used.erase (isrc);
-    //    used.insert(idst);
-    //}
+        pos  [isrc] = -1;
+        ext  [isrc].reset();
+        shift[isrc] =  0;
+        seq  [isrc].reset();
+
+        used.erase (isrc);
+        used.insert(idst);
+
+        seq_pos_add(idst);
+    }
 
     // copy the state of cells [i, i + n) (used for save/restore the state of the cells)
     llama_kv_cells cp(uint32_t i, uint32_t n) const {
@@ -394,6 +403,23 @@ public:
         return seq_pos[seq_id].rbegin()->first;
     }
 
+    // Whether every position for seq_id is stored in the cell with the same
+    // index and the represented positions form the dense range [0, max].
+    // The mismatch count is maintained with the existing seq_pos index so this
+    // check remains O(1) on the graph-build path.
+    bool seq_pos_is_cell_contiguous(llama_seq_id seq_id) const {
+        assert(seq_id >= 0);
+        assert(seq_id < LLAMA_MAX_SEQ);
+
+        const auto & positions = seq_pos[seq_id];
+        if (positions.empty() || seq_pos_index_mismatch[seq_id] != 0) {
+            return false;
+        }
+        const llama_pos pos_max = positions.rbegin()->first;
+        return positions.begin()->first == 0 && pos_max >= 0 &&
+               positions.size() == static_cast<size_t>(pos_max) + 1;
+    }
+
     // note: call only if the cell is not empty
     llama_pos pos_get(uint32_t i) const {
         assert(i < pos.size());
@@ -531,9 +557,18 @@ private:
     //
     std::set<std::pair<llama_pos, uint32_t>> seq_pos[LLAMA_MAX_SEQ];
 
+    // Number of cells for each sequence whose physical cell index differs
+    // from its logical position.
+    uint32_t seq_pos_index_mismatch[LLAMA_MAX_SEQ] = {};
+
     // helper functions for updating `seq_pos`, once cell at a time:
 
     void seq_pos_dec(llama_seq_id s, uint32_t i) {
+        if (pos[i] != static_cast<llama_pos>(i)) {
+            assert(seq_pos_index_mismatch[s] > 0);
+            --seq_pos_index_mismatch[s];
+        }
+
         const auto n = seq_pos[s].erase({ pos[i], i });
         assert(n == 1);
         GGML_UNUSED(n);
@@ -541,6 +576,9 @@ private:
 
     void seq_pos_inc(llama_seq_id s, uint32_t i) {
         seq_pos[s].insert({ pos[i], i });
+        if (pos[i] != static_cast<llama_pos>(i)) {
+            ++seq_pos_index_mismatch[s];
+        }
     }
 
     // remove cell i

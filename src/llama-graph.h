@@ -114,6 +114,10 @@ public:
 
     virtual void set_input(const llama_ubatch * ubatch) = 0;
 
+    // Persistent context data outside llama_memory is not preserved by any
+    // current cache exporter. Request inputs need no additional serialization.
+    virtual bool has_unserialized_context_state() const { return false; }
+
     // return true if the resulting input tensors using the provided graph parameters would be
     //   the same as the previous input tensors that we have currently stored in the object
     virtual bool can_reuse(const llm_graph_params & params) {
@@ -301,6 +305,7 @@ public:
     llm_graph_input_cross_embd(
             const llama_cross * cross) : cross(cross) {}
     virtual ~llm_graph_input_cross_embd() = default;
+    bool has_unserialized_context_state() const override { return true; }
 
     void set_input(const llama_ubatch * ubatch) override;
 
@@ -661,6 +666,7 @@ class llm_graph_input_attn_cross : public llm_graph_input_i {
 public:
     llm_graph_input_attn_cross(const llama_cross * cross) : cross(cross) {}
     ~llm_graph_input_attn_cross() = default;
+    bool has_unserialized_context_state() const override { return true; }
 
     void set_input(const llama_ubatch * ubatch) override;
 

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cinttypes>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <future>
@@ -348,6 +349,9 @@ namespace GGUFMeta {
         return true;
     }
 
+    template bool llama_model_loader::get_arr<int32_t>(
+            const std::string & key, std::vector<int32_t> & result, bool required);
+
     template<typename T, size_t N_MAX>
     bool llama_model_loader::get_arr(const std::string & key, std::array<T, N_MAX> & result, bool required) {
         const gguf_context * ctx = metadata;
@@ -536,14 +540,20 @@ llama_model_loader::llama_model_loader(
         void * set_tensor_data_ud,
         const std::string & fname,
         std::vector<std::string> & splits,
+        bool ordered_parts,
         FILE * file,
         llama_load_mode load_mode,
         bool check_tensors,
         bool no_alloc,
         bool load_mtp,
         const llama_model_kv_override * param_overrides_p,
-        const llama_model_tensor_buft_override * param_tensor_buft_overrides_p)
+        const llama_model_tensor_buft_override * param_tensor_buft_overrides_p,
+        const llama_model_loader_stage_selection * selection)
         : metadata(meta), set_tensor_data(set_tensor_data), set_tensor_data_ud(set_tensor_data_ud) {
+    if (selection != nullptr) {
+        stage_selection = *selection;
+        has_stage_selection = true;
+    }
     int trace = 0;
     if (getenv("LLAMA_TRACE")) {
         trace = atoi(getenv("LLAMA_TRACE"));
@@ -580,6 +590,17 @@ llama_model_loader::llama_model_loader(
         files.emplace_back(new llama_file(fname.c_str(), "rb", use_direct_io));
         contexts.emplace_back(ctx);
 
+        const int metadata_only_key = gguf_find_key(metadata, "skippy.package.metadata_only");
+        const bool metadata_only_carrier =
+                metadata_only_key >= 0 &&
+                gguf_get_kv_type(metadata, metadata_only_key) == GGUF_TYPE_BOOL &&
+                gguf_get_val_bool(metadata, metadata_only_key);
+        if (metadata_only_carrier && !ordered_parts && !no_alloc) {
+            throw std::runtime_error(
+                    "metadata-only GGUF carriers require ordered payload parts for runtime loading");
+        }
+        const bool metadata_only_primary = metadata_only_carrier && ordered_parts;
+
         // Save tensors data offset of the main file.
         // For subsidiary files, `meta` tensor data offset must not be used,
         // so we build a unified tensors index for weights.
@@ -589,15 +610,57 @@ llama_model_loader::llama_model_loader(
             if (weights_map.find(tensor_name) != weights_map.end()) {
                 throw std::runtime_error(format("invalid model: tensor '%s' is duplicated", ggml_get_name(cur)));
             }
+            if (metadata_only_primary) {
+                continue;
+            }
             n_elements += ggml_nelements(cur);
             n_bytes    += ggml_nbytes(cur);
-            weights_map.emplace(tensor_name, llama_tensor_weight(files.back().get(), 0, metadata, cur));
+            weights_map.emplace(tensor_name, llama_tensor_weight(files.back().get(), 0, metadata, cur, no_alloc));
+        }
+
+        if (ordered_parts) {
+            if (splits.empty() || splits.front() != fname) {
+                throw std::runtime_error(format("ordered GGUF parts must include the primary file as the first path"));
+            }
+            if (splits.size() > UINT16_MAX) {
+                throw std::runtime_error(format("too many ordered GGUF parts: %zu", splits.size()));
+            }
+
+            for (size_t part_idx = 1; part_idx < splits.size(); ++part_idx) {
+                const char * fname_part = splits[part_idx].c_str();
+
+                struct gguf_init_params part_params = {
+                    /*.no_alloc = */ true,
+                    /*.ctx      = */ &ctx,
+                };
+                gguf_context_ptr ctx_gguf { gguf_init_from_file(fname_part, part_params) };
+                if (!ctx_gguf) {
+                    throw std::runtime_error(format("%s: failed to load GGUF part from %s", __func__, fname_part));
+                }
+
+                files.emplace_back(new llama_file(fname_part, "rb", use_direct_io));
+                contexts.emplace_back(ctx);
+
+                for (ggml_tensor * cur = ggml_get_first_tensor(ctx); cur; cur = ggml_get_next_tensor(ctx, cur)) {
+                    std::string tensor_name = std::string(cur->name);
+                    if (weights_map.find(tensor_name) != weights_map.end()) {
+                        continue;
+                    }
+                    n_elements += ggml_nelements(cur);
+                    n_bytes    += ggml_nbytes(cur);
+                    weights_map.emplace(tensor_name, llama_tensor_weight(files.back().get(), part_idx, ctx_gguf.get(), cur, no_alloc));
+                }
+            }
+
+            if (trace > 0) {
+                LLAMA_LOG_INFO("%s: loaded %zu ordered GGUF parts\n", __func__, splits.size());
+            }
         }
         uint16_t n_split = 0;
         get_key(llm_kv(LLM_KV_SPLIT_COUNT), n_split, false);
 
         // Load additional GGML contexts
-        if (n_split > 1) {
+        if (!ordered_parts && n_split > 1) {
             // make sure the main file is loaded first
             uint16_t idx = 0;
             const std::string kv_split_no = llm_kv(LLM_KV_SPLIT_NO);
@@ -657,7 +720,7 @@ llama_model_loader::llama_model_loader(
                     }
                     n_elements += ggml_nelements(cur);
                     n_bytes    += ggml_nbytes(cur);
-                    weights_map.emplace(tensor_name, llama_tensor_weight(files.back().get(), idx, ctx_gguf.get(), cur));
+                    weights_map.emplace(tensor_name, llama_tensor_weight(files.back().get(), idx, ctx_gguf.get(), cur, no_alloc));
                 }
             }
 
@@ -708,7 +771,7 @@ llama_model_loader::llama_model_loader(
             }
             n_elements += ggml_nelements(cur);
             n_bytes    += ggml_nbytes(cur);
-            weights_map.emplace(tensor_name, llama_tensor_weight(files.back().get(), 0, metadata, cur));
+            weights_map.emplace(tensor_name, llama_tensor_weight(files.back().get(), 0, metadata, cur, no_alloc));
         }
     } else {
         get_key(llm_kv(LLM_KV_GENERAL_ARCHITECTURE), arch_name, false);
@@ -717,6 +780,16 @@ llama_model_loader::llama_model_loader(
 
     n_kv      = gguf_get_n_kv(metadata);
     n_tensors = weights_map.size();
+
+    if (has_stage_selection) {
+        for (const std::string & name : stage_selection.resident_tensor_names) {
+            if (weights_map.find(name) == weights_map.end()) {
+                throw std::runtime_error(format(
+                        "admitted resident tensor '%s' is absent from model payloads",
+                        name.c_str()));
+            }
+        }
+    }
 
     fver = (enum llama_fver) gguf_get_version(metadata);
 
@@ -1119,9 +1192,11 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         const buft_list_t * buft_list_layer, const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags) {
     // set below, before buft_for_tensor() runs
     bool is_lazy = false;
+    bool is_resident = true;
+    const std::string tensor_name = tn.str();
 
     auto ctx_for_buft = [&](ggml_backend_buffer_type_t buft) -> ggml_context * {
-        const ctx_key key { buft, is_lazy };
+        const ctx_key key { buft, is_lazy, is_resident };
 
         auto it = ctx_map.find(key);
         if (it == ctx_map.end()) {
@@ -1129,7 +1204,7 @@ struct ggml_tensor * llama_model_loader::create_tensor(
             int max_n_tensors = n_tensors;
             max_n_tensors += 1;                   // duplicated output tensor
             max_n_tensors += hparams.n_layer()*2; // duplicated rope freq tensors
-            if (files.empty()) {
+            if (files.empty() || has_stage_selection) {
                 max_n_tensors += hparams.n_layer()*256; // this should be well above what any model actually uses
             }
             const size_t ctx_size = ggml_tensor_overhead()*max_n_tensors;
@@ -1152,14 +1227,34 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         return it->second.get();
     };
 
-    auto buft_for_tensor = [&](ggml_tensor * t_meta) -> ggml_backend_buffer_type_t {
-        if (!t_meta) {
-            if (flags & TENSOR_NOT_REQUIRED) {
-                return nullptr;
-            }
-            throw std::runtime_error(format("missing tensor '%s'", tn.str().c_str()));
+    auto stage_tensor_is_resident = [&](ggml_tensor * t_meta) -> bool {
+        if (!has_stage_selection) {
+            return true;
         }
 
+        if (stage_selection.resident_tensor_names.empty()) {
+            throw std::runtime_error("stage-plan loading requires explicit resident tensor names");
+        }
+        {
+            const bool keep = stage_selection.resident_tensor_names.find(tensor_name) !=
+                stage_selection.resident_tensor_names.end();
+            if (!keep) {
+                if (t_meta) {
+                    LLAMA_LOG_DEBUG(
+                            "llama_model_loader: retaining non-resident tensor metadata %s (size = %zu bytes)\n",
+                            tensor_name.c_str(),
+                            ggml_nbytes(t_meta));
+                }
+                return false;
+            }
+            if (t_meta != nullptr) {
+                skippy_requested_resident_tensors.insert(tensor_name);
+            }
+            return true;
+        }
+    };
+
+    auto buft_for_tensor = [&](ggml_tensor * t_meta) -> ggml_backend_buffer_type_t {
         // some models use the token embedding tensor as the output, but since these are used in different layers and with different ops
         // the tensor is duplicated
         // to handle this, we check if the tensor is duplicated, and if so, we assume that it is being loaded as the output tensor
@@ -1172,7 +1267,14 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         try {
             info = llm_tensor_info_for(tn_tensor);
         } catch (const std::out_of_range & e) {
-            throw std::runtime_error(format("missing tensor info mapping for %s", tn.str().c_str()));
+            throw std::runtime_error(format("missing tensor info mapping for %s", tensor_name.c_str()));
+        }
+
+        if (!t_meta) {
+            if (flags & TENSOR_NOT_REQUIRED) {
+                return nullptr;
+            }
+            throw std::runtime_error(format("missing tensor '%s'", tn.str().c_str()));
         }
 
         // skip unused tensors
@@ -1180,8 +1282,10 @@ struct ggml_tensor * llama_model_loader::create_tensor(
             const size_t nbytes = ggml_nbytes(t_meta);
             LLAMA_LOG_WARN("model has unused tensor %s (size = %zu bytes) -- ignoring\n", tn.str().c_str(), nbytes);
 
-            size_data -= nbytes;
-            n_created++;
+            if (!has_stage_selection ||
+                    (is_resident && skippy_counted_stage_tensors.insert(tensor_name).second)) {
+                n_created++;
+            }
 
             return nullptr;
         }
@@ -1201,11 +1305,11 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         // sanity checks
         if (info.layer == LLM_TENSOR_LAYER_INPUT || info.layer == LLM_TENSOR_LAYER_OUTPUT) {
             if (tn.bid != -1) {
-                GGML_ABORT("input/output layer tensor %s used with a layer number", tn.str().c_str());
+                GGML_ABORT("input/output layer tensor %s used with a layer number", tensor_name.c_str());
             }
         } else {
             if (tn.bid == -1) {
-                GGML_ABORT("repeating layer tensor %s used without a layer number", tn.str().c_str());
+                GGML_ABORT("repeating layer tensor %s used without a layer number", tensor_name.c_str());
             }
         }
 
@@ -1263,7 +1367,7 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         if (!buft) {
             buft = select_weight_buft(hparams, t_meta, op, buft_list);
             if (!buft) {
-                throw std::runtime_error(format("failed to find a compatible buffer type for tensor %s", tn.str().c_str()));
+                throw std::runtime_error(format("failed to find a compatible buffer type for tensor %s", tensor_name.c_str()));
             }
         }
 
@@ -1290,17 +1394,9 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         return buft;
     };
 
-    if (files.empty()) {
-        if (flags & TENSOR_SKIP_IF_VIRTUAL) {
-            return nullptr;
-        }
-        ggml_type type = GGML_TYPE_F32;
-        const int64_t tid = gguf_find_tensor(metadata, tn.str().c_str());
-        if (tid != -1) {
-            type = gguf_get_tensor_type(metadata, tid);
-        }
-
-        // for tensors that are not required some of the dimensions can be invalid:
+    auto create_synthetic_tensor = [&](ggml_type type) -> ggml_tensor * {
+        // Optional tensors can have invalid dimensions when the architecture
+        // does not use them. Do not manufacture metadata for those tensors.
         if (flags & TENSOR_NOT_REQUIRED) {
             for (size_t dim = 0; dim < ne.size(); dim++) {
                 if (ne.begin()[dim] <= 0) {
@@ -1318,31 +1414,72 @@ struct ggml_tensor * llama_model_loader::create_tensor(
             if (dim == 0) {
                 t_meta.nb[dim] = ggml_type_size(type);
             } else if (dim == 1) {
-                t_meta.nb[dim] = ggml_row_size(type, t_meta.ne[dim-1]);
+                t_meta.nb[dim] = ggml_row_size(type, t_meta.ne[dim - 1]);
             } else {
-                t_meta.nb[dim] = t_meta.nb[dim-1]*t_meta.ne[dim-1];
+                t_meta.nb[dim] = t_meta.nb[dim - 1]*t_meta.ne[dim - 1];
             }
             GGML_ASSERT(t_meta.nb[dim] >= 1);
         }
-        ggml_set_name(&t_meta, tn.str().c_str());
+        ggml_set_name(&t_meta, tensor_name.c_str());
 
+        is_resident = stage_tensor_is_resident(&t_meta);
         ggml_backend_buffer_type_t buft = buft_for_tensor(&t_meta);
-        GGML_ASSERT(buft != nullptr);
+        if (buft == nullptr) {
+            return nullptr;
+        }
         ggml_context * ctx = ctx_for_buft(buft);
         ggml_tensor * ret = ggml_dup_tensor(ctx, &t_meta);
-        ggml_set_name(ret, tn.str().c_str());
+        ggml_set_name(ret, tensor_name.c_str());
         return ret;
+    };
+
+    if (files.empty()) {
+        if (flags & TENSOR_SKIP_IF_VIRTUAL) {
+            return nullptr;
+        }
+        ggml_type type = GGML_TYPE_F32;
+        const int64_t tid = gguf_find_tensor(metadata, tn.str().c_str());
+        if (tid != -1) {
+            type = gguf_get_tensor_type(metadata, tid);
+        } else if (gguf_find_key(metadata, "skippy.convert.tensor_count") >= 0) {
+            if (flags & TENSOR_NOT_REQUIRED) {
+                return nullptr;
+            }
+            throw std::runtime_error(format("missing tensor '%s'", tn.str().c_str()));
+        }
+
+        return create_synthetic_tensor(type);
     }
 
-    LLAMA_LOG_DEBUG("%s: loading tensor %s\n", __func__, tn.str().c_str());
-    const struct ggml_tensor * cur = check_tensor_dims(tn.str(), ne, !(flags & TENSOR_NOT_REQUIRED), flags & TENSOR_ALLOW_RESHAPE);
+    LLAMA_LOG_DEBUG("%s: loading tensor %s\n", __func__, tensor_name.c_str());
+
+    if (has_stage_selection && get_tensor_meta(tensor_name.c_str()) == nullptr &&
+            stage_selection.resident_tensor_names.find(tensor_name) ==
+                stage_selection.resident_tensor_names.end()) {
+        ggml_type type = GGML_TYPE_F32;
+        const int64_t tid = gguf_find_tensor(metadata, tensor_name.c_str());
+        if (tid != -1) {
+            type = gguf_get_tensor_type(metadata, tid);
+        } else if (flags & TENSOR_NOT_REQUIRED) {
+            // Preserve the architecture's optional-tensor branch when the
+            // complete model metadata says that this tensor does not exist.
+            return nullptr;
+        }
+        LLAMA_LOG_DEBUG(
+                "%s: synthesizing metadata for non-resident tensor %s\n",
+                __func__,
+                tensor_name.c_str());
+        return create_synthetic_tensor(type);
+    }
+
+    const struct ggml_tensor * cur = check_tensor_dims(tensor_name, ne, !(flags & TENSOR_NOT_REQUIRED), flags & TENSOR_ALLOW_RESHAPE);
     if (cur == NULL) {
         return NULL;
     }
 
     if (flags & TENSOR_READ_LAZY) {
         // the decision must not depend on the load mode, or the memory-fit pass (no_alloc, no mmap)
-        is_lazy = lazy.add(tn.str(), cur, no_alloc ? nullptr : &require_weight(tn.str().c_str()));
+        is_lazy = lazy.add(tensor_name, cur, no_alloc ? nullptr : &require_weight(tensor_name.c_str()));
     }
 
     ggml_tensor t_meta = *cur;
@@ -1361,6 +1498,7 @@ struct ggml_tensor * llama_model_loader::create_tensor(
 
     GGML_ASSERT(ggml_nbytes(&t_meta) == ggml_nbytes(cur));
 
+    is_resident = stage_tensor_is_resident(&t_meta);
     ggml_backend_buffer_type_t buft = buft_for_tensor(&t_meta);
     if (buft == nullptr) {
         return nullptr;
@@ -1370,20 +1508,18 @@ struct ggml_tensor * llama_model_loader::create_tensor(
 
     // if duplicated, check if the original tensor was allocated in the same buffer type context and avoid creating a new one
     if (flags & TENSOR_DUPLICATED) {
-        ggml_tensor * t = ggml_get_tensor(ctx, tn.str().c_str());
+        ggml_tensor * t = ggml_get_tensor(ctx, tensor_name.c_str());
         if (t) {
             return t;
         }
     }
 
-    const bool duplicated = flags & TENSOR_DUPLICATED;
-
     struct ggml_tensor * tensor = ggml_dup_tensor(ctx, &t_meta);
     ggml_set_name(tensor, ggml_get_name(&t_meta));
 
-    if (duplicated) {
-        size_data += ggml_nbytes(&t_meta);
-    } else {
+    if (!(flags & TENSOR_DUPLICATED) &&
+            (!has_stage_selection ||
+             (is_resident && skippy_counted_stage_tensors.insert(tensor_name).second))) {
         n_created++;
     }
 
@@ -1391,6 +1527,20 @@ struct ggml_tensor * llama_model_loader::create_tensor(
 }
 
 void llama_model_loader::done_getting_tensors(bool partial) const {
+    if (has_stage_selection &&
+            skippy_requested_resident_tensors != stage_selection.resident_tensor_names) {
+        for (const std::string & name : stage_selection.resident_tensor_names) {
+            if (skippy_requested_resident_tensors.find(name) == skippy_requested_resident_tensors.end()) {
+                throw std::runtime_error(format(
+                        "%s: admitted resident tensor '%s' was not requested by the model builder",
+                        __func__,
+                        name.c_str()));
+            }
+        }
+        throw std::runtime_error(format(
+                "%s: model builder requested a tensor outside the admitted resident closure",
+                __func__));
+    }
     if (n_created > n_tensors) {
         throw std::runtime_error(format("%s: too many tensors created; expected %d, got %d", __func__, n_tensors, n_created));
     }
@@ -1441,9 +1591,28 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
         }
     }
 
-    // compute the total size of all tensors for progress reporting
-    for (const auto & it : weights_map) {
-        size_data += ggml_nbytes(it.second.tensor);
+    // Match load_all_data exactly once model contexts exist. A physical weight
+    // can appear in more than one context (for example, tied embeddings used as
+    // the output head), and load_all_data uploads it once per context. Counting
+    // logical create_tensor requests instead can therefore finish early and
+    // unmap weights that a later context still has to upload.
+    size_data = 0;
+    if (!ctx_map.empty()) {
+        for (const auto & [_, ctx] : ctx_map) {
+            for (ggml_tensor * tensor = ggml_get_first_tensor(ctx.get());
+                    tensor != nullptr;
+                    tensor = ggml_get_next_tensor(ctx.get(), tensor)) {
+                if (get_weight(ggml_get_name(tensor)) != nullptr) {
+                    size_data += ggml_nbytes(tensor);
+                }
+            }
+        }
+    } else {
+        // Quantization initializes mappings before constructing model contexts
+        // and reads weights through load_data_range rather than load_all_data.
+        for (const auto & [_, weight] : weights_map) {
+            size_data += ggml_nbytes(weight.tensor);
+        }
     }
 }
 
@@ -1563,6 +1732,7 @@ bool llama_model_loader::load_all_data(
         return true;
     }
     GGML_ASSERT(size_data != 0 && "call init_mappings() first");
+    const size_t size_done_before = size_done;
 
     std::vector<std::future<std::pair<ggml_tensor *, bool>>> validation_result;
 
@@ -1689,7 +1859,10 @@ bool llama_model_loader::load_all_data(
         }
 
         if (progress_callback) {
-            if (!progress_callback((float) size_done / size_data, progress_callback_user_data)) {
+            const float progress = std::min(
+                    (float) size_done / size_data,
+                    std::nextafter(1.0f, 0.0f));
+            if (!progress_callback(progress, progress_callback_user_data)) {
                 return false;
             }
         }
@@ -1813,6 +1986,7 @@ bool llama_model_loader::load_all_data(
         }
 
         size_done += n_size;
+        GGML_ASSERT(size_done <= size_data);
     }
 
     // free temporary resources used for async uploads
@@ -1839,7 +2013,7 @@ bool llama_model_loader::load_all_data(
     }
 
     // check if this is the last call and do final cleanup
-    if (size_done >= size_data) {
+    if (size_done_before < size_data && size_done == size_data) {
         // unmap offloaded tensors and metadata
         if (use_mmap) {
             for (uint32_t idx = 0; idx < mappings.size(); idx++) {

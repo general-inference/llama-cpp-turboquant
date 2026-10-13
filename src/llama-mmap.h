@@ -13,6 +13,16 @@ struct llama_file;
 struct llama_mmap;
 struct llama_mlock;
 
+#ifdef LLAMA_STAGE_BUILD_TESTS
+struct llama_file_read_accounting {
+    size_t calls = 0;
+    size_t bytes = 0;
+};
+
+void llama_file_read_accounting_begin(llama_file_read_accounting * accounting);
+void llama_file_read_accounting_end(llama_file_read_accounting * accounting);
+#endif
+
 using llama_files  = std::vector<std::unique_ptr<llama_file>>;
 using llama_mmaps  = std::vector<std::unique_ptr<llama_mmap>>;
 using llama_mlocks = std::vector<std::unique_ptr<llama_mlock>>;

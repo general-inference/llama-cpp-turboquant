@@ -413,6 +413,7 @@ static ggml_type tensor_type_fallback(quantize_state_impl & qs, const ggml_tenso
             case GGML_TYPE_IQ3_XXS:
             case GGML_TYPE_IQ3_S:   // types on the right: block size 32
             case GGML_TYPE_IQ4_XS:  return_type = GGML_TYPE_IQ4_NL; break;
+            case GGML_TYPE_Q1_0:
             case GGML_TYPE_Q2_0:
             case GGML_TYPE_Q2_K:
             case GGML_TYPE_Q3_K:
@@ -974,7 +975,7 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
     const llama_model_kv_override * kv_overrides = params->kv_overrides;
     std::vector<std::string> splits = {};
     llama_model_loader ml(/*metadata*/ nullptr, /*set_tensor_data*/ nullptr, /*set_tensor_data_ud*/ nullptr,
-        fname_inp, splits, /*file*/ nullptr, /*load_mode*/ load_mode, /*check_tensors*/ true, /*no_alloc*/ false, /*load_mtp*/ true, kv_overrides, nullptr);
+        fname_inp, splits, /*ordered_parts*/ false, /*file*/ nullptr, /*load_mode*/ load_mode, /*check_tensors*/ true, /*no_alloc*/ false, /*load_mtp*/ true, kv_overrides, nullptr);
     ml.init_mappings(false); // no prefetching
 
     auto mparams = llama_model_default_params();
@@ -1484,6 +1485,13 @@ bool llama_quant_tensor_allows_quantization(
     return tensor_allows_quantization(qs->params, qs->model.arch, tensor);
 }
 
+bool llama_quant_tensor_requires_imatrix(
+        const ggml_tensor * tensor,
+        ggml_type type,
+        llama_ftype ftype) {
+    return tensor_requires_imatrix(ggml_get_name(tensor), type, ftype);
+}
+
 void llama_quant_compute_types(
         quantize_state_impl * qs,
         llama_ftype ftype,
@@ -1500,7 +1508,7 @@ void llama_quant_compute_types(
     qs->i_ffn_gate          = 0;
     qs->i_ffn_up            = 0;
     qs->n_fallback          = 0;
-    qs->has_imatrix         = false;
+    qs->has_imatrix         = qs->params->imatrix != nullptr;
     qs->has_tied_embeddings = true;
 
     // build metadata from tensor names

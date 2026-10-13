@@ -416,6 +416,31 @@ llama_file::llama_file(FILE * file) : pimpl(std::make_unique<impl>(file)) {}
 
 llama_file::~llama_file() = default;
 
+#ifdef LLAMA_STAGE_BUILD_TESTS
+static thread_local llama_file_read_accounting * g_llama_file_read_accounting = nullptr;
+
+void llama_file_read_accounting_begin(llama_file_read_accounting * accounting) {
+    GGML_ASSERT(accounting != nullptr);
+    GGML_ASSERT(g_llama_file_read_accounting == nullptr);
+    accounting->calls = 0;
+    accounting->bytes = 0;
+    g_llama_file_read_accounting = accounting;
+}
+
+void llama_file_read_accounting_end(llama_file_read_accounting * accounting) {
+    GGML_ASSERT(accounting != nullptr);
+    GGML_ASSERT(g_llama_file_read_accounting == accounting);
+    g_llama_file_read_accounting = nullptr;
+}
+
+static void llama_file_account_read(size_t bytes) {
+    if (g_llama_file_read_accounting != nullptr) {
+        ++g_llama_file_read_accounting->calls;
+        g_llama_file_read_accounting->bytes += bytes;
+    }
+}
+#endif
+
 size_t llama_file::tell() const { return pimpl->tell(); }
 size_t llama_file::size() const { return pimpl->size; }
 
@@ -438,11 +463,26 @@ int llama_file::file_id() const {
 }
 
 void llama_file::seek(size_t offset, int whence) const { pimpl->seek(offset, whence); }
-void llama_file::read_raw(void * ptr, size_t len) { pimpl->read_raw(ptr, len); }
+void llama_file::read_raw(void * ptr, size_t len) {
+#ifdef LLAMA_STAGE_BUILD_TESTS
+    llama_file_account_read(len);
+#endif
+    pimpl->read_raw(ptr, len);
+}
 #ifdef _WIN32
-void llama_file::read_raw_unsafe(void * ptr, size_t len) { pimpl->read_raw(ptr, len); }
+void llama_file::read_raw_unsafe(void * ptr, size_t len) {
+#ifdef LLAMA_STAGE_BUILD_TESTS
+    llama_file_account_read(len);
+#endif
+    pimpl->read_raw(ptr, len);
+}
 #else
-void llama_file::read_raw_unsafe(void * ptr, size_t len) { pimpl->read_raw_unsafe(ptr, len); }
+void llama_file::read_raw_unsafe(void * ptr, size_t len) {
+#ifdef LLAMA_STAGE_BUILD_TESTS
+    llama_file_account_read(len);
+#endif
+    pimpl->read_raw_unsafe(ptr, len);
+}
 #endif
 
 uint32_t llama_file::read_u32() { return pimpl->read_u32(); }

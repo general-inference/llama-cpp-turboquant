@@ -14,14 +14,37 @@
 
 #include <array>
 #include <map>
+#include <string>
 #include <vector>
 
 struct llama_model;
 class llama_batch_allocr;
 class llama_moe_cache;
 
+struct skippy_activation_port_shape {
+    std::string binding;
+    enum ggml_type type = GGML_TYPE_COUNT;
+    uint32_t rank = 0;
+    int32_t token_axis = -1;
+    bool optional = false;
+    bool token_axis_explicit = false;
+    int64_t dimensions[GGML_MAX_DIMS] = {};
+};
+
 class llama_io_read_i;
 class llama_io_write_i;
+
+// Internal decode contract; embedding batches have protocol-specific row widths.
+int64_t llama_decode_input_width(
+        const llama_hparams & hparams, llm_arch arch, llama_context_type ctx_type,
+        bool has_embeddings);
+
+int skippy_external_decode_observe(llama_context * ctx, const llama_batch & batch);
+skippy_graph_build_inputs skippy_external_decode_build_inputs(llama_context * ctx);
+llama_context * llama_init_from_model_with_graph_inputs(
+        llama_model * model,
+        llama_context_params params,
+        const skippy_graph_build_inputs & graph_build_inputs);
 
 // "memory" as in abstract memory for the context
 struct llama_memory_i;
@@ -46,7 +69,8 @@ struct llama_context {
     // init scheduler and compute buffers, reserve worst-case graphs
     llama_context(
             const llama_model & model,
-                  llama_context_params params);
+                  llama_context_params params,
+            const skippy_graph_build_inputs & graph_build_inputs = {});
 
     ~llama_context();
 
@@ -57,11 +81,17 @@ struct llama_context {
     //   - changing attention type
     //   - etc.
     void sched_reserve();
+    void sched_reserve(const skippy_graph_build_inputs & graph_build_inputs);
 
     void synchronize();
 
     const llama_model   & get_model()   const;
     const llama_cparams & get_cparams() const;
+    const skippy_graph_build_inputs & get_graph_build_inputs() const;
+    uint64_t get_sched_reserve_count() const;
+#ifdef LLAMA_STAGE_BUILD_TESTS
+    void set_fused_gdn_for_test(bool fused_ar, bool fused_chunk);
+#endif
 
     ggml_backend_sched_t get_sched() const;
 
@@ -69,6 +99,7 @@ struct llama_context {
     uint32_t n_ctx_seq() const;
     uint32_t n_batch()   const;
     uint32_t n_ubatch()  const;
+    bool     kv_unified() const;
     uint32_t n_seq_max() const;
 
     uint32_t n_threads()       const;
@@ -78,6 +109,7 @@ struct llama_context {
 
     // return true if the memory was updated
     bool memory_update(bool optimize);
+    bool memory_update(bool optimize, const skippy_graph_build_inputs & graph_build_inputs);
 
     enum llama_pooling_type pooling_type() const;
 
@@ -143,14 +175,19 @@ struct llama_context {
                 const llama_ubatch & ubatch,
                     llm_graph_type   gtype,
             llama_memory_context_i * mctx,
-                       ggml_status & ret);
+                       ggml_status & ret,
+            const skippy_graph_build_inputs & graph_build_inputs = {});
 
     int encode(const llama_batch_ext & batch_inp);
+    int encode(const llama_batch_ext & batch_inp, const skippy_graph_build_inputs & graph_build_inputs);
     int decode(const llama_batch_ext & batch_inp);
+    int decode(const llama_batch_ext & batch_inp, const skippy_graph_build_inputs & graph_build_inputs);
 
     // compat version
     int encode(const llama_batch & batch_inp);
+    int encode(const llama_batch & batch_inp, const skippy_graph_build_inputs & graph_build_inputs);
     int decode(const llama_batch & batch_inp);
+    int decode(const llama_batch & batch_inp, const skippy_graph_build_inputs & graph_build_inputs);
 
     //
     // state save/load
@@ -252,13 +289,34 @@ public:
 
     // can reuse the llm_graph_result instance of the context (for example to update a memory module)
     llm_graph_result * get_gf_res_reserve() const;
+    uint32_t admit_skippy_cache_capabilities(uint32_t memory_capabilities) {
+        if (!skippy_cache_admission_bound) {
+            skippy_cache_admitted_capabilities = skippy_cache_profile_seen
+                    ? skippy_cache_capabilities & memory_capabilities : 0;
+            skippy_cache_admission_bound = true;
+        }
+        return skippy_cache_admitted_capabilities;
+    }
+    // live graph result of the most recent schedule, or null before the first build
+    llm_graph_result * get_gf_res_prev_active() const;
 
     // returns the result of ggml_backend_sched_graph_compute_async execution
     ggml_status graph_compute(ggml_cgraph * gf, bool batched);
 
     // reserve a graph with a dummy ubatch of the specified size
-    ggml_cgraph * graph_reserve(
-        uint32_t n_tokens, uint32_t n_seqs, uint32_t n_outputs, const llama_memory_context_i * mctx, bool split_only = false, size_t * sizes = nullptr);
+    ggml_cgraph * graph_reserve(uint32_t                          n_tokens,
+                                uint32_t                          n_seqs,
+                                uint32_t                          n_outputs,
+                                const llama_memory_context_i *    mctx,
+                                bool                              split_only         = false,
+                                size_t *                          sizes              = nullptr,
+                                const skippy_graph_build_inputs & graph_build_inputs = {},
+                                bool                              embedding_input    = false);
+
+    bool get_activation_boundary(enum ggml_type & type, uint64_t & elements_per_token, uint64_t & bytes_per_token) const;
+    bool get_input_activation_boundary(enum ggml_type & type, uint64_t & elements_per_token, uint64_t & bytes_per_token) const;
+    bool get_activation_frontier(std::vector<skippy_activation_port_shape> & parts) const;
+    bool get_input_activation_frontier(std::vector<skippy_activation_port_shape> & parts) const;
 
     bool set_sampler(llama_seq_id seq_id, llama_sampler * sampler);
 
@@ -269,7 +327,8 @@ private:
                         llm_graph_result * res,
                       const llama_ubatch & ubatch,
             const llama_memory_context_i * mctx,
-                          llm_graph_type   gtype) const;
+                          llm_graph_type   gtype,
+            const skippy_graph_build_inputs & graph_build_inputs = {}) const;
 
     llm_graph_cb graph_get_cb() const;
 
@@ -284,7 +343,10 @@ private:
 
     // disable auto fused ops (Flash Attention, Gated Delta Net) whose op lands on a device
     // that differs from the layer it belongs to (usually due to missing backend support)
-    void resolve_fused_ops(const llama_memory_context_i * mctx, uint32_t n_seqs);
+    void resolve_fused_ops(
+            const llama_memory_context_i * mctx,
+            uint32_t n_seqs,
+            const skippy_graph_build_inputs & graph_build_inputs);
 
     // TODO: read/write lora adapters and cvec
     size_t state_write_data(llama_io_write_i & io);
@@ -300,6 +362,10 @@ private:
     const llama_model & model;
 
     llama_cparams cparams;
+
+    const skippy_graph_build_inputs graph_build_inputs;
+    uint64_t computation_generation = 0;
+
 
     llama_adapter_cvec_ptr  cvec;
     llama_adapter_loras_ptr loras;
@@ -367,6 +433,7 @@ private:
     ggml_backend_sched_ptr sched;
 
     bool sched_need_reserve = true;
+    uint64_t sched_reserve_count = 0;
 
     // whether the reserve graph has a logits tensor, set in sched_reserve()
     // true until then, because the first output_reserve() runs before any graph is reserved
@@ -414,8 +481,31 @@ private:
     // Separate arenas give batches with and without outputs distinct CUDA graph cache keys.
     std::array<llm_graph_result_ptr, 2> gf_res_prev;
     llm_graph_result_ptr gf_res_reserve;
+    // Intersect every reserved prefill/decode profile; no configuration can authorize state coverage.
+    uint32_t skippy_cache_capabilities = UINT32_MAX;
+    bool skippy_cache_profile_seen = false;
+    uint32_t skippy_cache_admitted_capabilities = 0;
+    bool skippy_cache_admission_bound = false;
 
     llm_graph_result * gf_res_prev_active = nullptr;
+
+    bool activation_boundary_observed = false;
+    bool activation_boundary_stable = true;
+    enum ggml_type activation_boundary_type = GGML_TYPE_COUNT;
+    uint64_t activation_boundary_elements_per_token = 0;
+    uint64_t activation_boundary_bytes_per_token = 0;
+
+    bool input_activation_boundary_observed = false;
+    bool input_activation_boundary_stable = true;
+    enum ggml_type input_activation_boundary_type = GGML_TYPE_COUNT;
+    uint64_t input_activation_boundary_elements_per_token = 0;
+    uint64_t input_activation_boundary_bytes_per_token = 0;
+    bool activation_frontier_observed = false;
+    bool activation_frontier_stable = true;
+    std::vector<skippy_activation_port_shape> activation_frontier;
+    bool input_activation_frontier_observed = false;
+    bool input_activation_frontier_stable = true;
+    std::vector<skippy_activation_port_shape> input_activation_frontier;
 
     // host buffer for the model output (logits and embeddings)
     ggml_backend_buffer_ptr buf_output;

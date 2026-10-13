@@ -205,7 +205,22 @@ uint32_t llama_hparams::n_embd_v_gqa_max() const {
     return val;
 }
 
+uint32_t llama_hparams::n_embd_k_idx(uint32_t il) const {
+    if (!indexer_kv || indexer_head_size == 0) {
+        return 0; // arch without a MSA indexer
+    }
+    if (il < n_layer_dense_lead) {
+        return 0; // leading dense layers carry no indexer
+    }
+    return indexer_head_size;
+}
+
 uint32_t llama_hparams::n_embd_r() const {
+    if (n_embd_r_impl != 0) {
+        // Explicit override for architectures with packed recurrent state.
+        return n_embd_r_impl;
+    }
+
     if (wkv_head_size != 0) {
         // for RWKV models
         return token_shift_count * n_embd;

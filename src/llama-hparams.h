@@ -74,9 +74,7 @@ struct llama_hparams {
     uint32_t n_layer_nextn = 0;
     uint32_t n_layer_decision = 0; // trailing blocks that form the decision head
 
-    // granite-switch: index of the single-head "router" KV layer that encodes
-    // per-token adapter selection. -1 when the model has no such layer.
-    int32_t  router_layer = -1;
+    int32_t router_layer = -1;
     uint32_t n_expert = 0;
     uint32_t n_rel_attn_bkts = 0;
     uint32_t n_value_expert      = 0; // MoVA value experts (K2 Horizon)
@@ -104,6 +102,9 @@ struct llama_hparams {
     struct llama_hparams_convnext convnext;
 
     uint32_t n_shortconv_l_cache  = 0;
+
+    // Explicit override for the rolling state size per layer (see n_embd_r()).
+    uint32_t n_embd_r_impl = 0;
 
     std::array<uint32_t, LLAMA_MAX_LAYERS> n_head_arr;
     std::array<uint32_t, LLAMA_MAX_LAYERS> n_head_kv_arr;
@@ -309,6 +310,16 @@ struct llama_hparams {
     // MSA
     uint32_t indexer_block_size  = 0;
     uint32_t indexer_local_blocks = 0;
+    // MSA stores its indexer keys in the main KV cache (k_idx tensors);
+    bool indexer_kv = false;
+    uint32_t indexer_top_k_freq = 0;
+    uint32_t indexer_skip_top_k_offset = 0;
+    bool     indexer_types_present = false;
+    std::array<int32_t, LLAMA_MAX_LAYERS> indexer_types = []() {
+        std::array<int32_t, LLAMA_MAX_LAYERS> types;
+        types.fill(-1);
+        return types;
+    }(); // -1 unknown, 0 shared, 1 full
 
     // Indexer is "full" (1) or "shared" (0)
     // Shared indexers reuse top-k from previous full layer
@@ -468,6 +479,9 @@ struct llama_hparams {
     // return the maximum n_embd_k_gqa/n_embd_v_gqa across all layers
     uint32_t n_embd_k_gqa_max() const;
     uint32_t n_embd_v_gqa_max() const;
+
+    // dimension of the single-head MSA indexer key stream
+    uint32_t n_embd_k_idx(uint32_t il = 0) const;
 
     // dimension of the rolling state embeddings
     // corresponds to Mamba's conv_states size or RWKV's token_shift states size

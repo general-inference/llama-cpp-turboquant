@@ -6,12 +6,15 @@
 #include "llama-memory.h"
 
 #include <unordered_map>
+#include <string>
 #include <vector>
 
 struct llama_cparams;
 struct llama_hparams;
 struct llama_model;
 struct llama_context;
+struct skippy_kv_page_desc;
+struct skippy_cachegen_record_v1;
 
 //
 // llama_kv_cache
@@ -93,6 +96,12 @@ public:
 
     using slot_info_vec_t = std::vector<slot_info>;
 
+    struct compaction_move {
+        uint32_t strm;
+        uint32_t src;
+        uint32_t dst;
+    };
+
     // TODO: refactor the memory instances to not depend on `llama_model`
     //       instead pass all necessary info (e.g. hparams, dev layers, arch, etc.) directly
     //       likely through `struct llama_memory_params`
@@ -158,6 +167,8 @@ public:
     uint32_t get_size()     const;
     uint32_t get_n_seq_max() const;
     uint32_t get_n_stream() const;
+    uint64_t get_used_cells() const;
+    uint32_t get_n_swa() const { return n_swa; }
 
     bool get_has_shift() const;
 
@@ -166,7 +177,7 @@ public:
 
     std::vector<uint32_t> get_layer_ids() const;
     ggml_tensor * get_k_storage(int32_t il) const;
-
+    ggml_tensor * get_v_storage(int32_t il) const;
     const llama_kv_cells & get_cells(llama_seq_id seq_id) const;
 
     // The stream holding seq_id's cells.
@@ -186,19 +197,55 @@ public:
     // undo a state_read() of seq_id (-1 for the whole cache) that another memory module failed to complete
     void state_clear(llama_seq_id seq_id);
 
+    bool stage_export_kv_page(
+            llama_seq_id seq_id,
+            int32_t layer_start,
+            int32_t layer_end,
+            uint64_t token_start,
+            uint64_t token_count,
+            skippy_kv_page_desc * out_desc,
+            void * output,
+            size_t output_capacity,
+            size_t * out_bytes,
+            std::string & error) const;
+
+    bool stage_import_kv_page(
+            llama_seq_id seq_id,
+            const skippy_kv_page_desc & desc,
+            const void * input,
+            size_t input_bytes,
+            std::string & error,
+            bool validate_only = false);
+
+    bool stage_import_cachegen_kv_page(
+            llama_seq_id seq_id,
+            const skippy_kv_page_desc & desc,
+            const skippy_cachegen_record_v1 * records,
+            size_t record_count,
+            size_t output_base,
+            std::string & error,
+            bool & unsupported,
+            bool & invalid_argument,
+            bool validate_only = false);
+
     //
     // graph_build API
     //
 
     uint32_t get_n_kv(const slot_info & sinfo) const;
 
+    // active cell count when position p lives in physical cell p; 0 for any non-contiguous layout
+    uint32_t get_n_kv_pos_contiguous(const slot_info & sinfo, const llama_ubatch & ubatch) const;
+
     // get views of the current state of the cache
     ggml_tensor * get_k(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
     ggml_tensor * get_v(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
+    ggml_tensor * get_k_idx(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
 
     // store k_cur and v_cur in the cache based on the provided head location
     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const;
     ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il, const slot_info & sinfo) const;
+    ggml_tensor * cpy_k_idx(ggml_context * ctx, ggml_tensor * k_idx_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const;
 
     //
     // preparation API
@@ -217,6 +264,10 @@ public:
 
     // emplace the ubatch context into slot: [sinfo.idxs[0...ubatch.n_tokens - 1]]
     void apply_ubatch(const slot_info & sinfo, const llama_ubatch & ubatch);
+
+    // move used cells toward the beginning of each stream and copy the backing KV rows
+    std::vector<compaction_move> compact_cells();
+    void copy_compacted_cells(const std::vector<compaction_move> & moves) const;
 
     //
     // input API
@@ -261,12 +312,18 @@ private:
 
         ggml_tensor * k;
         ggml_tensor * v;
+        ggml_tensor * k_idx;   // MSA single-head indexer keys, F32
 
         std::vector<ggml_tensor *> k_stream;
         std::vector<ggml_tensor *> v_stream;
+        std::vector<ggml_tensor *> k_idx_stream;
     };
 
     bool v_trans = true;  // the value tensor is transposed
+
+    const ggml_type key_type;
+    const ggml_type value_type;
+    const std::string tensor_name_tag;
 
     const uint32_t n_seq_max = 1;
     const uint32_t n_stream  = 1;
@@ -291,6 +348,9 @@ private:
 
     // env: LLAMA_KV_CACHE_DEBUG
     int debug = 0;
+
+    // set when a k_idx (indexer) cache exists and the stream layout supports MSA (single seq, or one stream per seq)
+    bool msa_strict_slots = false;
 
     // this is the SWA type of the cache - not to be confused with the model SWA type
     const llama_swa_type swa_type = LLAMA_SWA_TYPE_NONE;
@@ -320,10 +380,15 @@ private:
     // model layer id -> KV cache layer id
     std::unordered_map<int32_t, int32_t> map_layer_ids;
 
+    ggml_tensor * graph_k_storage(ggml_context * ctx, int32_t il) const;
+    ggml_tensor * graph_v_storage(ggml_context * ctx, int32_t il) const;
+    ggml_tensor * graph_k_idx_storage(ggml_context * ctx, int32_t il) const;
+
     size_t total_size() const;
 
     size_t size_k_bytes() const;
     size_t size_v_bytes() const;
+    size_t size_k_idx_bytes() const;
 
     ggml_tensor * build_rope_shift(
             const llama_cparams & cparams,
@@ -374,7 +439,8 @@ public:
             llama_kv_cache * kv,
             llama_context * lctx,
             bool do_shift,
-            stream_copy_info sc_info);
+            stream_copy_info sc_info,
+            bool did_compact);
 
     // used to create a batch processing context from a batch
     llama_kv_cache_context(
@@ -399,6 +465,7 @@ public:
     //
 
     uint32_t get_n_kv() const;
+    uint32_t get_n_kv_pos_contiguous() const;
 
     ggml_type type_k() const;
     ggml_type type_v() const;
@@ -406,6 +473,11 @@ public:
     // get views of the current state of the cache
     ggml_tensor * get_k(ggml_context * ctx, int32_t il) const;
     ggml_tensor * get_v(ggml_context * ctx, int32_t il) const;
+    ggml_tensor * get_k_idx(ggml_context * ctx, int32_t il) const;
+
+    // State storage and cache ownership used by native planning and execution.
+    ggml_tensor * get_k_storage(int32_t il) const;
+    ggml_tensor * get_v_storage(int32_t il) const;
 
     // store k_cur and v_cur in the cache based on the provided head location
     // note: the heads in k_cur and v_cur should be laid out contiguously in memory
@@ -415,6 +487,7 @@ public:
     //   - v_idxs [n_tokens] or [n_tokens*n_embd_v_gqa] depending if V cache is transposed
     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const;
     ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il) const;
+    ggml_tensor * cpy_k_idx(ggml_context * ctx, ggml_tensor * k_idx_cur, ggml_tensor * k_idxs, int32_t il) const;
 
     // create destination indices for each head of the current batch for where it would be written in the KV cache
     // the indices address the global KV cache (not per stream) - this is not relevant for the user of this API, but
@@ -441,8 +514,8 @@ public:
 private:
     llama_memory_status status;
 
-    llama_kv_cache * kv;
-    llama_context * lctx;
+    llama_kv_cache * kv = nullptr;
+    llama_context * lctx = nullptr;
 
     //
     // update context

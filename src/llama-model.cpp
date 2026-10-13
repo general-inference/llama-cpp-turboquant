@@ -7,6 +7,7 @@
 #include "llama-mmap.h"
 #include "llama-cparams.h"
 #include "llama-model-loader.h"
+#include "skippy/stage_realization.h"
 
 #include "llama-kv-cache.h"
 #include "llama-kv-cache-iswa.h"
@@ -42,8 +43,6 @@
 
 static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params & params) {
     switch (arch) {
-        case LLM_ARCH_CLIP:
-            return new llama_model_clip(params);
         case LLM_ARCH_LLAMA:
             return new llama_model_llama(params);
         case LLM_ARCH_LLAMA4:
@@ -1015,7 +1014,6 @@ const char * llm_type_name(llm_type type) {
         case LLM_TYPE_100B_A6B:      return "100B.A6B";
         case LLM_TYPE_102B_A12B:     return "102B.A12B";
         case LLM_TYPE_106B_A12B:     return "106B.A12B";
-        case LLM_TYPE_118B_A8B:      return "118B.A8B";
         case LLM_TYPE_120B_A12B:     return "120B.A12B";
         case LLM_TYPE_122B_A10B:     return "122B.A10B";
         case LLM_TYPE_124B_A5_1B:    return "124B.A5.1B";
@@ -1267,6 +1265,16 @@ struct llama_model::impl {
     bool has_tensor_overrides;
 
     std::vector<float> tensor_split_owned;
+
+    struct tensor_source_location {
+        uint16_t split_no;
+        size_t data_offset;
+        size_t stored_length;
+        ggml_type type;
+        std::vector<int64_t> dimensions;
+    };
+
+    std::unordered_map<std::string, tensor_source_location> tensor_source_locations;
 };
 
 bool llama_prec_policy::apply(ggml_tensor * res) const {
@@ -1436,6 +1444,7 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
     std::fill(hparams.is_swa_impl.begin(),   hparams.is_swa_impl.end(), 0);
     std::fill(hparams.is_recr_impl.begin(),  hparams.is_recr_impl.end(),  llm_arch_is_recurrent(ml.get_arch()) ? 1 : 0);
     std::fill(hparams.is_indexer_full_impl.begin(), hparams.is_indexer_full_impl.end(), 0);
+    std::fill(hparams.indexer_types.begin(), hparams.indexer_types.end(), -1);
 
     std::fill(hparams.xielu_alpha_n.begin(), hparams.xielu_alpha_n.end(), 0.0f);
     std::fill(hparams.xielu_alpha_p.begin(), hparams.xielu_alpha_p.end(), 0.0f);
@@ -1652,13 +1661,33 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
 
     const int i_gpu_start = std::max(n_layer_all + 1 - n_gpu_layers, 0);
     const int act_gpu_layers = devices.empty() ? 0 : std::min(n_gpu_layers, n_layer_all + 1);
+    const auto * stage_selection = ml.get_stage_selection();
+    const int stage_gpu_start = std::max(
+            stage_selection != nullptr ? stage_selection->layer_start : 0,
+            i_gpu_start);
+    const int stage_gpu_end = std::min(
+            stage_selection != nullptr ? stage_selection->layer_end : n_layer_all,
+            i_gpu_start + act_gpu_layers);
+    const int stage_gpu_layers = std::max(stage_gpu_end - stage_gpu_start, 0);
+    if (stage_selection != nullptr && stage_gpu_layers > 0 && n_devices() > 1) {
+        LLAMA_LOG_INFO(
+            "load_tensors: distributing filtered stage layers %d..%d across %zu devices\n",
+            stage_gpu_start,
+            stage_gpu_end,
+            n_devices());
+    }
     auto get_layer_buft_list = [&](int il) -> llama_model::impl::layer_dev {
         const bool is_swa = il < n_layer_all && hparams.is_swa(il);
         if (il < i_gpu_start || (il - i_gpu_start) >= act_gpu_layers) {
             LLAMA_LOG_DEBUG("load_tensors: layer %3d assigned to device %s, is_swa = %d\n", il, ggml_backend_dev_name(cpu_dev), is_swa);
             return {cpu_dev, &pimpl->cpu_buft_list};
         }
-        const int layer_gpu = std::upper_bound(splits.begin(), splits.begin() + n_devices(), float(il - i_gpu_start)/act_gpu_layers) - splits.begin();
+        const bool is_filtered_stage_layer = stage_selection != nullptr &&
+            il >= stage_gpu_start && il < stage_gpu_end && stage_gpu_layers > 0;
+        const float layer_fraction = is_filtered_stage_layer ?
+            float(il - stage_gpu_start)/stage_gpu_layers :
+            float(il - i_gpu_start)/act_gpu_layers;
+        const int layer_gpu = std::upper_bound(splits.begin(), splits.begin() + n_devices(), layer_fraction) - splits.begin();
         auto * dev = devices.at(layer_gpu).dev;
         LLAMA_LOG_DEBUG("load_tensors: layer %3d assigned to device %s, is_swa = %d\n", il, ggml_backend_dev_name(dev), is_swa);
         return {dev, &pimpl->gpu_buft_list.at(dev)};
@@ -1741,13 +1770,13 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
             }
 
             // MoE expert weight scales (per-expert, shape {n_expert})
-            if (!layer.ffn_gate_exps_s && layer.ffn_gate_exps) {
+            if (!layer.ffn_gate_exps_s && (layer.ffn_gate_exps || ml.get_tensor_meta(tn(LLM_TENSOR_FFN_GATE_EXPS, "scale", i).str().c_str()) != nullptr)) {
                 layer.ffn_gate_exps_s = create_tensor(tn(LLM_TENSOR_FFN_GATE_EXPS, "scale", i), {n_expert}, TENSOR_NOT_REQUIRED);
             }
-            if (!layer.ffn_down_exps_s && layer.ffn_down_exps) {
+            if (!layer.ffn_down_exps_s && (layer.ffn_down_exps || ml.get_tensor_meta(tn(LLM_TENSOR_FFN_DOWN_EXPS, "scale", i).str().c_str()) != nullptr)) {
                 layer.ffn_down_exps_s = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "scale", i), {n_expert}, TENSOR_NOT_REQUIRED);
             }
-            if (!layer.ffn_up_exps_s && layer.ffn_up_exps) {
+            if (!layer.ffn_up_exps_s && (layer.ffn_up_exps || ml.get_tensor_meta(tn(LLM_TENSOR_FFN_UP_EXPS, "scale", i).str().c_str()) != nullptr)) {
                 layer.ffn_up_exps_s = create_tensor(tn(LLM_TENSOR_FFN_UP_EXPS, "scale", i), {n_expert}, TENSOR_NOT_REQUIRED);
             }
 
@@ -1849,7 +1878,7 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
         }
     }
 
-    ml.done_getting_tensors();
+    ml.done_getting_tensors(ml.get_stage_selection() != nullptr);
 
     if (per_layer_tok_embd && ml.lazy.has(per_layer_tok_embd)) {
         LLAMA_LOG_INFO("%s: enabling prefetch for '%s'\n", __func__, per_layer_tok_embd->name);
@@ -1866,7 +1895,27 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
     // populate tensors_by_name
     for (auto & [_, ctx_ptr] : ml.ctx_map) {
         for (auto * cur = ggml_get_first_tensor(ctx_ptr.get()); cur != NULL; cur = ggml_get_next_tensor(ctx_ptr.get(), cur)) {
-            tensors_by_name.emplace_back(ggml_get_name(cur), cur);
+            const char * name = ggml_get_name(cur);
+            tensors_by_name.emplace_back(name, cur);
+            const auto * weight = ml.get_weight(name);
+            if (weight != nullptr) {
+                const impl::tensor_source_location location = {
+                    weight->idx,
+                    weight->offs,
+                    ggml_nbytes(weight->tensor),
+                    weight->tensor->type,
+                    std::vector<int64_t>(weight->tensor->ne, weight->tensor->ne + GGML_MAX_DIMS),
+                };
+                const auto inserted = pimpl->tensor_source_locations.emplace(name, location);
+                if (!inserted.second &&
+                        (inserted.first->second.split_no != location.split_no ||
+                         inserted.first->second.data_offset != location.data_offset ||
+                         inserted.first->second.stored_length != location.stored_length ||
+                         inserted.first->second.type != location.type ||
+                         inserted.first->second.dimensions != location.dimensions)) {
+                    throw std::runtime_error(format("tensor '%s' has conflicting source locations", name));
+                }
+            }
         }
     }
 
@@ -1891,6 +1940,15 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
 
         // skip contexts without tensors
         if (ggml_get_first_tensor(ctx) == nullptr) {
+            continue;
+        }
+
+        if (!ctx_key.resident) {
+            // Keep the complete logical model metadata alive for whole-graph
+            // construction. The admitted slice is required to remove every
+            // operation that references these tensors before scheduler
+            // allocation, so no backing buffer or payload read is permitted.
+            pimpl->ctxs_bufs.emplace_back(std::move(ctx_ptr), std::vector<ggml_backend_buffer_ptr>{});
             continue;
         }
 
@@ -2409,6 +2467,40 @@ llama_split_mode llama_model::split_mode() const {
     return params.split_mode;
 }
 
+bool llama_model::tensor_source_location(
+        const char * name,
+        uint16_t & split_no,
+        size_t & data_offset,
+        size_t & stored_length) const {
+    if (name == nullptr) {
+        return false;
+    }
+    const auto found = pimpl->tensor_source_locations.find(name);
+    if (found == pimpl->tensor_source_locations.end()) {
+        return false;
+    }
+    split_no = found->second.split_no;
+    data_offset = found->second.data_offset;
+    stored_length = found->second.stored_length;
+    return true;
+}
+
+bool llama_model::tensor_source_metadata(
+        const char * name,
+        ggml_type & type,
+        std::vector<int64_t> & dimensions) const {
+    if (name == nullptr) {
+        return false;
+    }
+    const auto found = pimpl->tensor_source_locations.find(name);
+    if (found == pimpl->tensor_source_locations.end()) {
+        return false;
+    }
+    type = found->second.type;
+    dimensions = found->second.dimensions;
+    return true;
+}
+
 std::map<ggml_backend_buffer_type_t, size_t> llama_model::memory_breakdown() const {
     std::map<ggml_backend_buffer_type_t, size_t> ret;
     for (const auto & [ctx, bufs] : pimpl->ctxs_bufs) {
@@ -2613,7 +2705,6 @@ void llama_model::print_info() const {
                 arch == LLM_ARCH_GRANITE ||
                 arch == LLM_ARCH_GRANITE_MOE ||
                 arch == LLM_ARCH_GRANITE_HYBRID ||
-                arch == LLM_ARCH_GRANITE_SWITCH ||
                 arch == LLM_ARCH_NEMOTRON_H_MOE) {
             LLAMA_LOG_INFO("%s: f_embedding_scale     = %f\n", __func__, hparams.f_embedding_scale);
             LLAMA_LOG_INFO("%s: f_residual_scale      = %f\n", __func__, hparams.f_residual_scale);
@@ -2753,7 +2844,32 @@ ggml_tensor * llama_model::get_rope_factors(const llama_cparams & cparams, int i
     return layers[il].rope_short;
 }
 
-llama_memory_i * llama_model::create_memory(const llama_memory_params & params, const llama_cparams & cparams) const {
+static llama_memory_i::layer_filter_cb skippy_select_stage_memory(
+        llama_memory_i::layer_filter_cb filter,
+        enum llama_context_type ctx_type,
+        const skippy_graph_selection & stage_selection,
+        int32_t layer_count) {
+    if (!stage_selection.enabled || ctx_type == LLAMA_CONTEXT_TYPE_MTP) {
+        return filter;
+    }
+
+    const int32_t layer_start = stage_selection.layer_start;
+    const int32_t layer_end   = stage_selection.layer_end;
+    return [filter = std::move(filter), layer_start, layer_end, layer_count](int32_t il) {
+        const bool in_stage = il >= layer_start && il < layer_end;
+        // Auxiliary state domains are described by ordinals outside the
+        // decoder layer interval and are replicated per stage. This rule is
+        // semantic and applies to every architecture; no family sentinel is
+        // admitted here.
+        const bool replicated = il >= layer_count;
+        return (in_stage || replicated) && (!filter || filter(il));
+    };
+}
+
+llama_memory_i * llama_model::create_memory(
+        const llama_memory_params & params,
+        const llama_cparams & cparams,
+        const skippy_graph_selection & stage_selection) const {
     llama_memory_i * res;
 
     // the non-causal LFM2 decision graph reads the whole prompt in one batch, nothing is kept
@@ -2785,10 +2901,12 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
             } break;
         case LLM_ARCH_MINIMAX_M3:
             {
-                // sparse (MSA) layers carry an indexer key cache, but leading dense layers do not
+                // Sparse MSA layers carry an indexer key cache, while leading
+                // dense layers only use the base K/V cache.
+                auto filter_base = skippy_select_stage_memory(nullptr, params.ctx_type, stage_selection, hparams.n_layer());
                 llama_kv_cache::layer_filter_cb filter_idx =
                     [&](int32_t il) { return (uint32_t) il >= hparams.n_layer_dense_lead; };
-
+                filter_idx = skippy_select_stage_memory(std::move(filter_idx), params.ctx_type, stage_selection, hparams.n_layer());
                 res = new llama_kv_cache_msa(
                         *this,
                         params.type_k,
@@ -2801,7 +2919,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                         1,
                         hparams.n_swa,
                         hparams.swa_type,
-                        nullptr,
+                        filter_base,
                         filter_idx,
                         nullptr);
             } break;
@@ -3086,7 +3204,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             std::max((uint32_t) 1, cparams.n_seq_max),
                             cparams.n_seq_max,
                             cparams.n_rs_seq,
-                            nullptr);
+                            skippy_select_stage_memory(nullptr, params.ctx_type, stage_selection, hparams.n_layer()));
                 } else if (llm_arch_is_hybrid(arch) && !mtp_on_hybrid_qwen && !mtp_on_hybrid_nemotron) {
                     // The main difference between hybrid architectures is the
                     // layer filters, so pick the right one here
@@ -3130,6 +3248,20 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             }
                         }
                     }
+
+                    // Preserve llama.cpp's default hybrid partition before
+                    // intersecting it with the runtime-slice layer range.
+                    // Wrapping a null callback directly turns it into a
+                    // stage-only predicate and makes attention caches include
+                    // recurrent layers (and vice versa).
+                    if (!filter_attn) {
+                        filter_attn = [&](uint32_t il) { return !hparams.is_recr(il); };
+                    }
+                    if (!filter_recr) {
+                        filter_recr = [&](uint32_t il) { return hparams.is_recr(il); };
+                    }
+                    filter_attn = skippy_select_stage_memory(std::move(filter_attn), params.ctx_type, stage_selection, hparams.n_layer());
+                    filter_recr = skippy_select_stage_memory(std::move(filter_recr), params.ctx_type, stage_selection, hparams.n_layer());
 
                     if (hparams.swa_type != LLAMA_SWA_TYPE_NONE) {
                         // Use hybrid-iswa for hybrid models with SWA
@@ -3223,6 +3355,8 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                         }
                     }
 
+                    filter = skippy_select_stage_memory(std::move(filter), params.ctx_type, stage_selection, hparams.n_layer());
+
                     if (hparams.swa_type != LLAMA_SWA_TYPE_NONE) {
                         GGML_ASSERT(hparams.is_swa_any());
 
@@ -3304,7 +3438,8 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
 ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
     std::unique_ptr<llm_graph_context> llm = build_arch_graph(params);
 
-    // add on pooling layer
+    // Build one canonical whole-model graph. Stage realization below is the
+    // sole filtering authority; architecture builders never choose endpoints.
     llm->build_pooling(cls, cls_b, cls_out, cls_out_b, cls_norm);
 
     // add the LM head (if the context outputs logits)
@@ -3312,14 +3447,10 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
 
     // add backend sampling layers (if any)
     llm->build_sampling();
-
-    // if the gguf model was converted with --sentence-transformers-dense-modules
-    // there will be two additional dense projection layers
-    // dense linear projections are applied after pooling
-    // TODO: move reranking logic here and generalize
     llm->build_dense_out(dense_2_out_layers, dense_2_out_layers_b, dense_3_out_layers);
 
     llm->res->set_outputs(params);
+    skippy_realize_stage_graph(*this, params, *llm->res);
 
     return llm->res->get_gf();
 }
@@ -3829,21 +3960,6 @@ void llama_model_base::create_tensor_qkv(llama_layer & layer, int bid,
         int64_t n_embd_, int64_t n_embd_q_, int64_t n_embd_k_, int64_t n_embd_v_,
         int flags) {
     const int64_t n_embd_qkv = n_embd_q_ + n_embd_k_ + n_embd_v_;
-
-    if (flags & TENSOR_SKIP) {
-        const int skip = TENSOR_NOT_REQUIRED | TENSOR_SKIP;
-
-        create_tensor(tn(LLM_TENSOR_ATTN_QKV, "weight", bid), {n_embd_, n_embd_qkv}, skip | TENSOR_SKIP_IF_VIRTUAL);
-        create_tensor(tn(LLM_TENSOR_ATTN_QKV, "bias",   bid), {n_embd_qkv},          skip | TENSOR_SKIP_IF_VIRTUAL);
-        create_tensor(tn(LLM_TENSOR_ATTN_Q,   "weight", bid), {n_embd_, n_embd_q_},  skip);
-        create_tensor(tn(LLM_TENSOR_ATTN_K,   "weight", bid), {n_embd_, n_embd_k_},  skip);
-        create_tensor(tn(LLM_TENSOR_ATTN_V,   "weight", bid), {n_embd_, n_embd_v_},  skip);
-        create_tensor(tn(LLM_TENSOR_ATTN_Q,   "bias",   bid), {n_embd_q_},           skip);
-        create_tensor(tn(LLM_TENSOR_ATTN_K,   "bias",   bid), {n_embd_k_},           skip);
-        create_tensor(tn(LLM_TENSOR_ATTN_V,   "bias",   bid), {n_embd_v_},           skip);
-        return;
-    }
-
     layer.wqkv = create_tensor(tn(LLM_TENSOR_ATTN_QKV, "weight", bid), {n_embd_, n_embd_qkv}, TENSOR_NOT_REQUIRED | TENSOR_SKIP_IF_VIRTUAL);
     if (layer.wqkv) {
         layer.wqkv_b = create_tensor(tn(LLM_TENSOR_ATTN_QKV, "bias", bid), {n_embd_qkv}, TENSOR_NOT_REQUIRED | TENSOR_SKIP_IF_VIRTUAL);
@@ -3909,7 +4025,7 @@ uint32_t llama_model_get_tok_embd(const struct llama_model * model, float * out)
 
     const ggml_tensor * tensor = model->tok_embd;
     const size_t nelements = ggml_nelements(tensor);
-    GGML_ASSERT(nelements <= UINT32_MAX); // for the return type
+    GGML_ASSERT(nelements <= UINT32_MAX);
 
     if (out == nullptr) {
         return (uint32_t) nelements;

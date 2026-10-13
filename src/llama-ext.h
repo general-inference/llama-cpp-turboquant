@@ -50,6 +50,12 @@ LLAMA_API bool llama_quant_tensor_allows_quantization(
         const quantize_state_impl * qs,
         const ggml_tensor * tensor);
 
+// Returns whether the selected tensor type requires importance weights.
+LLAMA_API bool llama_quant_tensor_requires_imatrix(
+        const ggml_tensor * tensor,
+        ggml_type type,
+        llama_ftype ftype);
+
 // Compute quantization type assignments for a list of tensors.
 // All tensors should be quantizable (use llama_quant_tensor_allows_quantization to filter).
 // result_types: caller-allocated array of n_tensors elements, filled with assigned types.

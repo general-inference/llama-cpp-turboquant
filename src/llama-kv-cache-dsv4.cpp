@@ -1165,14 +1165,16 @@ ggml_tensor * llama_dsv4_comp_state::get_kv_all(ggml_context * ctx, int32_t il) 
     const int32_t ids = map_layer_ids.at(il);
     ggml_tensor * state = layers[ids].kv;
 
-    return ggml_view_2d(ctx, state, state->ne[0], get_n_rows()*(1 + n_rs_seq), state->nb[1], 0);
+    ggml_tensor * result = ggml_view_2d(ctx, state, state->ne[0], get_n_rows()*(1 + n_rs_seq), state->nb[1], 0);
+    return result;
 }
 
 ggml_tensor * llama_dsv4_comp_state::get_score_all(ggml_context * ctx, int32_t il) const {
     const int32_t ids = map_layer_ids.at(il);
     ggml_tensor * state = layers[ids].score;
 
-    return ggml_view_2d(ctx, state, state->ne[0], get_n_rows()*(1 + n_rs_seq), state->nb[1], 0);
+    ggml_tensor * result = ggml_view_2d(ctx, state, state->ne[0], get_n_rows()*(1 + n_rs_seq), state->nb[1], 0);
+    return result;
 }
 
 ggml_tensor * llama_dsv4_comp_state::get_kv(ggml_context * ctx, int32_t il) const {

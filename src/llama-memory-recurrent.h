@@ -114,6 +114,13 @@ public:
     // a second conv history that must stay replicated across devices, so it cannot share the r row
     std::vector<ggml_tensor *> p_l;
 
+    // Graph-only metadata for layers whose recurrent state is not resident in
+    // this staged context. These tensors have no backing buffer and exist only
+    // so the canonical whole-model graph can be built before stage slicing.
+    std::vector<ggml_tensor *> graph_r_l;
+    std::vector<ggml_tensor *> graph_s_l;
+    std::vector<ggml_tensor *> graph_p_l;
+
 private:
     //const llama_model & model;
     const llama_hparams & hparams;
@@ -125,6 +132,8 @@ private:
 
     // true if no layers - can happen if the layer filter removes all layers
     bool is_empty() const;
+
+    ggml_context_ptr graph_ctx;
 
     size_t total_size() const;
 
