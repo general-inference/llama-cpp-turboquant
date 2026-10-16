@@ -56,7 +56,10 @@ common_chat_params common_chat_params_init_muse_glimmer(const common_chat_templa
         }
 
         if (extract_reasoning) {
-            p.rule("analysis", p.literal(" to=self<|message|>") + p.reasoning(p.until("<|eom|>")) + p.literal("<|eom|>"));
+            // Some checkpoints continue directly into the reasoning body
+            // after the assistant generation prefix.
+            auto reasoning_route = p.literal(" to=self<|message|>") | p.negate(p.literal(" to="));
+            p.rule("analysis", reasoning_route + p.reasoning(p.until("<|eom|>")) + p.literal("<|eom|>"));
         } else {
             p.rule("analysis", p.literal(" to=self<|message|>") + p.content(p.until("<|eom|>")) + p.literal("<|eom|>"));
         }

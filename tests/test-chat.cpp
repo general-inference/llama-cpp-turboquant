@@ -6821,6 +6821,12 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect(message_assist)
             .run();
 
+        tst.test(" can continue.<|eom|><|start|>assistant to=user<|message|>A red square.<|eot|>")
+            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+            .expect_reasoning(" can continue.")
+            .expect_content("A red square.")
+            .run();
+
         // A tool call as the first message of the turn: "<|start|>assistant" is the
         // generation prompt, so the output starts at " to=".
         tst.test(" to=special_function<|message|>" + call_markup)
