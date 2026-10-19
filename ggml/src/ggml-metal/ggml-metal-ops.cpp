@@ -3638,6 +3638,11 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
             }
         }
 
+        if (op->src[1]->type == GGML_TYPE_Q8_0 && op->src[2]->type == GGML_TYPE_TURBO4_0 &&
+                ne00 == 128 && ne10 == 128 && ne20 == 128) {
+            nsg = std::min<int64_t>(nsg, 2);
+        }
+
         ggml_metal_kargs_flash_attn_ext_vec args = {
             /*.ne01          =*/ ne01,
             /*.ne02          =*/ ne02,
