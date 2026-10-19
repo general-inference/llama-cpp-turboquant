@@ -7671,6 +7671,39 @@ struct test_flash_attn_ext : public test_case {
     }
 };
 
+struct test_flash_attn_ext_q4_asymmetric : public test_flash_attn_ext {
+    using test_flash_attn_ext::test_flash_attn_ext;
+
+    std::string vars() override {
+        return "q4_asymmetric_" + test_flash_attn_ext::vars();
+    }
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * out = test_flash_attn_ext::build_graph(ctx);
+        for (int i : {1, 2}) {
+            GGML_ASSERT(ggml_is_contiguously_allocated(out->src[i]) == !kv_view);
+        }
+        return out;
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        test_flash_attn_ext::initialize_tensors(ctx);
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
+            if (strcmp(t->name, "m") != 0) {
+                continue;
+            }
+            GGML_ASSERT(ggml_is_contiguous(t) && ggml_nelements(t) == kv*nb && kv >= nb);
+            std::vector<ggml_fp16_t> data(kv*nb);
+            for (int64_t q = 0; q < nb; ++q) {
+                for (int64_t k = 0; k < kv; ++k) {
+                    data[q*kv + k] = ggml_fp32_to_fp16(k <= kv - nb + q ? 0.0f : -INFINITY);
+                }
+            }
+            ggml_backend_tensor_set(t, data.data(), 0, data.size()*sizeof(ggml_fp16_t));
+        }
+    }
+};
+
 struct test_flash_attn_ext_turbo4_vec : public test_flash_attn_ext {
     const int64_t head_dim;
 
@@ -10629,6 +10662,26 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                     }
                 }
             }
+        }
+    }
+
+    // Asymmetric Q4 attention requires GGML_CUDA_FA_ALL_QUANTS on CUDA.
+    for (bool q4_k : {false, true}) {
+        for (int layout : {0, 1, 2}) {
+            const std::array<int32_t, 4> permute = layout == 2 ? std::array<int32_t, 4>{0, 2, 1, 3} : std::array<int32_t, 4>{0, 1, 2, 3};
+            auto add = [&](int kv, int nb, bool features) {
+                test_cases.emplace_back(new test_flash_attn_ext_q4_asymmetric(
+                    128, 128, 2, {2, 1}, kv, nb, true, features, 0, features ? 10.0f : 0.0f,
+                    GGML_PREC_F32, q4_k ? GGML_TYPE_Q4_0 : GGML_TYPE_Q8_0, q4_k ? GGML_TYPE_Q8_0 : GGML_TYPE_Q4_0,
+                    permute, layout != 0));
+            };
+            for (int nb : {1, 32}) {
+                for (int kv : {113, 256, 5120}) {
+                    add(kv, nb, false);
+                }
+            }
+            add(5120, 512, false);
+            add(256, 32, true);
         }
     }
 
