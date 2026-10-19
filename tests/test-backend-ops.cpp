@@ -7671,6 +7671,27 @@ struct test_flash_attn_ext : public test_case {
     }
 };
 
+struct test_flash_attn_ext_turbo_f16_conversion : public test_flash_attn_ext {
+    using test_flash_attn_ext::test_flash_attn_ext;
+
+    std::string vars() override {
+        return "turbo_f16_conversion_" + test_flash_attn_ext::vars();
+    }
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * out = test_flash_attn_ext::build_graph(ctx);
+        for (int i : {1, 2}) {
+            const ggml_tensor * t = out->src[i];
+            GGML_ASSERT(ggml_is_contiguously_allocated(t) == !kv_view);
+            if (ggml_is_quantized(t->type)) {
+                const int64_t blocks = ggml_nelements(t) / ggml_blck_size(t->type);
+                GGML_ASSERT((blocks % 2 != 0) == (hsk == 128));
+            }
+        }
+        return out;
+    }
+};
+
 struct test_flash_attn_ext_turbo4_vec : public test_flash_attn_ext {
     const int64_t head_dim;
 
@@ -10627,6 +10648,21 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+
+    // Prefill converts Turbo K and V independently to F16 on CUDA MMA hardware.
+    for (ggml_type type : {GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO4_0}) {
+        for (bool turbo_k : {false, true}) {
+            for (int head_dim : {128, 256}) {
+                for (int layout : {0, 1, 2}) {
+                    const std::array<int32_t, 4> permute = layout == 2 ? std::array<int32_t, 4>{0, 2, 1, 3} : std::array<int32_t, 4>{0, 1, 2, 3};
+                    test_cases.emplace_back(new test_flash_attn_ext_turbo_f16_conversion(
+                        head_dim, head_dim, 3, {1, 1}, 113, 32, true, false, 0, 0,
+                        GGML_PREC_F32, turbo_k ? type : GGML_TYPE_F16, turbo_k ? GGML_TYPE_F16 : type,
+                        permute, layout != 0));
                 }
             }
         }
