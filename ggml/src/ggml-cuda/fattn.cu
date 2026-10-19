@@ -3254,8 +3254,47 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
     return f16_extra.end - (uintptr_t) dst->data;
 }
 
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+static bool ggml_cuda_flash_attn_ext_use_q8_turbo4_prefill(int device, const ggml_tensor * dst) {
+    const ggml_tensor * Q = dst->src[0];
+    const ggml_tensor * K = dst->src[1];
+    const ggml_tensor * V = dst->src[2];
+    const ggml_tensor * mask = dst->src[3];
+    const int cc = ggml_cuda_info().devices[device].cc;
+    if (!ampere_mma_available(cc) || K->type != GGML_TYPE_Q8_0 || V->type != GGML_TYPE_TURBO4_0 ||
+        Q->ne[0] != 128 || K->ne[0] != 128 || V->ne[0] != 128 || Q->ne[1] < 32 ||
+        Q->ne[2] != 2*K->ne[2] || Q->ne[3] != 1 || K->ne[3] != 1 || V->ne[3] != 1 ||
+        !mask || K->ne[1] % FATTN_KQ_STRIDE != 0 || ggml_get_op_params_i32(dst, 4) != 0) {
+        return false;
+    }
+    if (V->view_src && (V->view_src == K || (V->view_src == K->view_src && V->view_offs == K->view_offs))) {
+        return false;
+    }
+    float max_bias;
+    memcpy(&max_bias, (const float *) dst->op_params + 1, sizeof(float));
+    if (max_bias != 0.0f) {
+        return false;
+    }
+    for (const ggml_tensor * t : {Q, mask}) {
+        for (size_t i = 1; i < GGML_MAX_DIMS; ++i) {
+            if (t->nb[i] % 16 != 0) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+#endif
+
 void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     ggml_cuda_set_device(ctx.device);
+
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+    if (ggml_cuda_flash_attn_ext_use_q8_turbo4_prefill(ctx.device, dst)) {
+        ggml_cuda_flash_attn_ext_mma_turbo_case<128, 128, 32, 2, GGML_TYPE_Q8_0, GGML_TYPE_TURBO4_0>(ctx, dst);
+        return;
+    }
+#endif
 
     // Fused turbo MMA decode gate (DEFAULT ON, see ggml_cuda_turbo_mma_fused; GGML_TURBO_MMA_FUSED=0 disables).
     // Routes turbo2/3/4 K==V, D in {128,256}, decode (Q->ne[1] <= 4) onto the GQA-packed
