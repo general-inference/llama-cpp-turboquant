@@ -7671,6 +7671,14 @@ struct test_flash_attn_ext : public test_case {
     }
 };
 
+struct test_flash_attn_ext_q8_turbo4_ne : public test_flash_attn_ext {
+    using test_flash_attn_ext::test_flash_attn_ext;
+
+    std::string vars() override {
+        return "q8_turbo4_ne_" + test_flash_attn_ext::vars();
+    }
+};
+
 struct test_flash_attn_ext_turbo4_vec : public test_flash_attn_ext {
     const int64_t head_dim;
 
@@ -10626,6 +10634,23 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    // Q8/Turbo4 decode at each Metal simdgroup count, with prefill controls.
+    for (int nr : {2, 4}) {
+        for (int kv : {113, 512, 2049, 4097}) {
+            for (int nb : {1, 32}) {
+                if (kv > 512 && nb != 1) continue;
+                for (bool permuted : {false, true}) {
+                    for (bool features : {false, true}) {
+                        const std::array<int32_t, 4> permute = permuted ? std::array<int32_t, 4>{0, 2, 1, 3} : std::array<int32_t, 4>{0, 1, 2, 3};
+                        test_cases.emplace_back(new test_flash_attn_ext_q8_turbo4_ne(
+                            128, 128, 4, {nr, 1}, kv, nb, features, features, features ? 1.0f : 0.0f, features ? 10.0f : 0.0f,
+                            GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_TURBO4_0, permute));
                     }
                 }
             }
