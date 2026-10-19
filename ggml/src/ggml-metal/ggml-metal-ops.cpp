@@ -3169,10 +3169,12 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
             const bool v_is_turbo = (type_v == GGML_TYPE_TURBO2_0 || type_v == GGML_TYPE_TURBO3_0 || type_v == GGML_TYPE_TURBO4_0);
             const bool k_is_q8 = (type_k == GGML_TYPE_Q8_0);
             const bool v_is_q8 = (type_v == GGML_TYPE_Q8_0);
+            const bool f16_turbo = type_k == GGML_TYPE_F16 &&
+                (type_v == GGML_TYPE_TURBO3_0 || type_v == GGML_TYPE_TURBO4_0) && ne10 == 128 && ne20 == 128;
             const bool supported = (k_is_turbo && v_is_turbo) ||
                                    (k_is_q8 && v_is_turbo) ||
-                                   (k_is_turbo && v_is_q8);
-            GGML_ASSERT(supported && "asymmetric K/V types only supported for turbo and q8_0 mixed pairs");
+                                   (k_is_turbo && v_is_q8) || f16_turbo;
+            GGML_ASSERT(supported && "unsupported asymmetric K/V pair");
         }
     }
 
@@ -3468,7 +3470,7 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
             ggml_metal_op_concurrency_reset(ctx);
         }
 
-        const int is_q = ggml_is_quantized(op->src[1]->type) ? 1 : 0;
+        const int is_q = (ggml_is_quantized(op->src[1]->type) || ggml_is_quantized(op->src[2]->type)) ? 1 : 0;
 
         // 2*(2*ncpsg)
         // ncpsg soft_max values + ncpsg mask values
