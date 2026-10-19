@@ -9282,7 +9282,8 @@ kernel void kernel_flash_attn_ext_vec_gqa2_kq8_0_vturbo4_dk128_dv128(
 
         float score0[8] = {0.0f};
         float score1[8] = {0.0f};
-        FOR_UNROLL (short cc = 0; cc < 8; ++cc) {
+        _Pragma("clang loop unroll(disable)")
+        for (short cc = 0; cc < 8; ++cc) {
             device const block_q8_0 * pk = (device const block_q8_0 *) (pk_base + (ic + 4*cc + ty)*args.nb11);
             FOR_UNROLL (short ii = 0; ii < 4; ++ii) {
                 const short i = ii*8 + tx;
