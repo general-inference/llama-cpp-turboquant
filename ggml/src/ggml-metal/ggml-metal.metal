@@ -9280,35 +9280,37 @@ kernel void kernel_flash_attn_ext_vec_gqa2_kq8_0_vturbo4_dk128_dv128(
             continue;
         }
 
-        float score0[8] = {0.0f};
-        float score1[8] = {0.0f};
+        const float score_mask = simd_shuffle(float(mask_value), 4*tx + ty);
         _Pragma("clang loop unroll(disable)")
         for (short cc = 0; cc < 8; ++cc) {
+            float score0 = 0.0f;
+            float score1 = 0.0f;
             device const block_q8_0 * pk = (device const block_q8_0 *) (pk_base + (ic + 4*cc + ty)*args.nb11);
             FOR_UNROLL (short ii = 0; ii < 4; ++ii) {
                 const short i = ii*8 + tx;
                 half4 mk;
                 dequantize_q8_0_t4(pk + i/8, i%8, mk);
-                score0[cc] += dot(float4(mk), float4(sq0[i]));
-                score1[cc] += dot(float4(mk), float4(sq1[i]));
+                score0 += dot(float4(mk), float4(sq0[i]));
+                score1 += dot(float4(mk), float4(sq1[i]));
             }
-            score0[cc] += simd_shuffle_down(score0[cc], 4);
-            score1[cc] += simd_shuffle_down(score1[cc], 4);
-            score0[cc] += simd_shuffle_down(score0[cc], 2);
-            score1[cc] += simd_shuffle_down(score1[cc], 2);
-            score0[cc] += simd_shuffle_down(score0[cc], 1);
-            score1[cc] += simd_shuffle_down(score1[cc], 1);
-            score0[cc] = simd_shuffle(score0[cc], 8*ty);
-            score1[cc] = simd_shuffle(score1[cc], 8*ty);
-        }
+            score0 += simd_shuffle_down(score0, 4);
+            score1 += simd_shuffle_down(score1, 4);
+            score0 += simd_shuffle_down(score0, 2);
+            score1 += simd_shuffle_down(score1, 2);
+            score0 += simd_shuffle_down(score0, 1);
+            score1 += simd_shuffle_down(score1, 1);
+            score0 = simd_shuffle(score0, 8*ty);
+            score1 = simd_shuffle(score1, 8*ty);
 
-        const float score_mask = simd_shuffle(float(mask_value), 4*tx + ty);
-        if (FC_flash_attn_ext_vec_has_mask) {
-            ss0[4*tx + ty] = fma(score0[tx], args.scale, score_mask);
-            ss1[4*tx + ty] = fma(score1[tx], args.scale, score_mask);
-        } else {
-            ss0[4*tx + ty] = score0[tx]*args.scale + score_mask;
-            ss1[4*tx + ty] = score1[tx]*args.scale + score_mask;
+            if (tx == cc) {
+                if (FC_flash_attn_ext_vec_has_mask) {
+                    ss0[4*cc + ty] = fma(score0, args.scale, score_mask);
+                    ss1[4*cc + ty] = fma(score1, args.scale, score_mask);
+                } else {
+                    ss0[4*cc + ty] = score0*args.scale + score_mask;
+                    ss1[4*cc + ty] = score1*args.scale + score_mask;
+                }
+            }
         }
         simdgroup_barrier(mem_flags::mem_threadgroup);
 
