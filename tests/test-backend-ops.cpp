@@ -7692,6 +7692,22 @@ struct test_flash_attn_ext_turbo_f16_conversion : public test_flash_attn_ext {
     }
 };
 
+struct test_flash_attn_ext_q8_turbo4_prefill : public test_flash_attn_ext {
+    using test_flash_attn_ext::test_flash_attn_ext;
+
+    std::string vars() override {
+        return "q8_turbo4_prefill_" + test_flash_attn_ext::vars();
+    }
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * out = test_flash_attn_ext::build_graph(ctx);
+        for (int i : {1, 2}) {
+            GGML_ASSERT(ggml_is_contiguously_allocated(out->src[i]) == !kv_view);
+        }
+        return out;
+    }
+};
+
 struct test_flash_attn_ext_turbo4_vec : public test_flash_attn_ext {
     const int64_t head_dim;
 
@@ -10666,6 +10682,34 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                 }
             }
         }
+    }
+
+    // Mixed prefill: 30 target cases and 27 fallback cases.
+    for (int layout : {0, 1, 2}) {
+        const std::array<int32_t, 4> permute = layout == 2 ? std::array<int32_t, 4>{0, 2, 1, 3} : std::array<int32_t, 4>{0, 1, 2, 3};
+        auto add = [&](int head_dim, int gqa, int kv, int nb, bool mask, bool sinks, float bias, float softcap) {
+            test_cases.emplace_back(new test_flash_attn_ext_q8_turbo4_prefill(
+                head_dim, head_dim, 2, {gqa, 1}, kv, nb, mask, sinks, bias, softcap,
+                GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_TURBO4_0, permute, layout != 0));
+        };
+        for (int nb : {32, 33, 75, 512}) {
+            for (int kv : {256, 2048}) {
+                add(128, 2, kv, nb, true, false, 0, 0);
+            }
+        }
+        for (int nb : {33, 512}) {
+            add(128, 2, 256, nb, true, true, 0, 10);
+        }
+        for (int nb : {1, 2, 31}) {
+            add(128, 2, 256, nb, true, false, 0, 0);
+        }
+        for (int gqa : {1, 4}) {
+            add(128, gqa, 256, 32, true, false, 0, 0);
+        }
+        add(128, 2, 113, 32, true, false, 0, 0);
+        add(128, 2, 256, 32, false, false, 0, 0);
+        add(128, 2, 256, 32, true, false, 8, 0);
+        add(256, 2, 256, 32, true, false, 0, 0);
     }
 
     // mixed quant and Q1_0 test cases
