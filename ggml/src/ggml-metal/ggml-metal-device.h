@@ -204,6 +204,7 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_att
         bool    has_bias,
         bool    has_scap,
         bool    has_kvpad,
+        bool    paired_heads,
         int32_t nsg,
         int32_t nwg);
 
