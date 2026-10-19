@@ -15,7 +15,6 @@ namespace {
 constexpr int D = 128;
 constexpr int HK = 8;
 constexpr int HQ = 16;
-constexpr int KV = 113;
 using values = std::vector<float>;
 
 // Fixed codec signs. The oracle multiplies an explicit matrix, not the production WHT.
@@ -66,8 +65,9 @@ values rotate(const values & source, bool inverse = false) {
     return result;
 }
 
-int cache_row(int logical) {
-    return (37*logical + 19) % KV;
+int cache_row(int logical, int kv) {
+    // 37 is coprime to both fixture lengths, so every cache row is written once.
+    return (37*logical + 19) % kv;
 }
 
 values make_source(int heads, int tokens, int seed) {
@@ -89,16 +89,16 @@ values make_source(int heads, int tokens, int seed) {
     return result;
 }
 
-values scatter(const values & source) {
+values scatter(const values & source, int kv) {
     values result(source.size());
-    for (int t = 0; t < KV; ++t) {
-        std::copy_n(source.data() + t*HK*D, HK*D, result.data() + cache_row(t)*HK*D);
+    for (int t = 0; t < kv; ++t) {
+        std::copy_n(source.data() + t*HK*D, HK*D, result.data() + cache_row(t, kv)*HK*D);
     }
     return result;
 }
 
 // Reconstruct the documented nearest-centroid/norm contract without using the codec writer.
-values quantized_reference(const values & source, ggml_type type) {
+values quantized_reference(const values & source, ggml_type type, int kv) {
     const std::vector<float> centroids = type == GGML_TYPE_TURBO3_0 ? std::vector<float>{
         -0.190207f, -0.118786f, -0.066822f, -0.021663f,
          0.021663f,  0.066822f,  0.118786f,  0.190207f,
@@ -129,18 +129,18 @@ values quantized_reference(const values & source, ggml_type type) {
             result[base + i] *= scale;
         }
     }
-    return scatter(result);
+    return scatter(result, kv);
 }
 
-values attention(const values & q, const values & k, const values & v, int nq) {
+values attention(const values & q, const values & k, const values & v, int nq, int kv) {
     values result(D*HQ*nq);
     for (int t = 0; t < nq; ++t) {
         for (int h = 0; h < HQ; ++h) {
             const int kh = h/(HQ/HK);
-            std::array<double, KV> scores{};
+            std::vector<double> scores(kv);
             double maximum = -std::numeric_limits<double>::infinity();
-            for (int logical = 0; logical <= KV - nq + t; ++logical) {
-                const int row = cache_row(logical);
+            for (int logical = 0; logical <= kv - nq + t; ++logical) {
+                const int row = cache_row(logical, kv);
                 double dot = 0;
                 for (int d = 0; d < D; ++d) {
                     dot += double(q[d + D*(h + HQ*t)])*k[d + D*(kh + HK*row)];
@@ -149,14 +149,14 @@ values attention(const values & q, const values & k, const values & v, int nq) {
                 maximum = std::max(maximum, scores[logical]);
             }
             double denominator = 0;
-            for (int logical = 0; logical <= KV - nq + t; ++logical) {
+            for (int logical = 0; logical <= kv - nq + t; ++logical) {
                 scores[logical] = std::exp(scores[logical] - maximum);
                 denominator += scores[logical];
             }
             for (int d = 0; d < D; ++d) {
                 double sum = 0;
-                for (int logical = 0; logical <= KV - nq + t; ++logical) {
-                    sum += scores[logical]*v[d + D*(kh + HK*cache_row(logical))];
+                for (int logical = 0; logical <= kv - nq + t; ++logical) {
+                    sum += scores[logical]*v[d + D*(kh + HK*cache_row(logical, kv))];
                 }
                 result[d + D*(h + HQ*t)] = float(sum/denominator);
             }
@@ -174,10 +174,11 @@ values read_f32(ggml_tensor * tensor) {
 values read_cache(ggml_tensor * tensor) {
     std::vector<uint8_t> bytes(ggml_nbytes(tensor));
     ggml_backend_tensor_get(tensor, bytes.data(), 0, bytes.size());
-    values result(D*HK*KV);
+    const int64_t kv = tensor->ne[1];
+    values result(size_t(D*HK*kv));
     const auto * traits = ggml_get_type_traits(tensor->type);
     GGML_ASSERT(traits->to_float != nullptr);
-    for (int row = 0; row < KV; ++row) {
+    for (int row = 0; row < kv; ++row) {
         traits->to_float(bytes.data() + row*tensor->nb[1], result.data() + row*D*HK, D*HK);
     }
     return result;
@@ -240,17 +241,17 @@ struct graph_tensors {
     ggml_tensor * output;
 };
 
-graph_tensors make_graph(ggml_context * ctx, ggml_type type, int nq) {
+graph_tensors make_graph(ggml_context * ctx, ggml_type type, int nq, int kv) {
     graph_tensors t{};
     t.graph = ggml_new_graph_custom(ctx, 64, false);
     t.q = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, D, HQ, nq);
-    t.k_source = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, D*HK, KV);
-    t.v_source = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, D*HK, KV);
-    t.rows = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, KV);
+    t.k_source = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, D*HK, kv);
+    t.v_source = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, D*HK, kv);
+    t.rows = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, kv);
     t.scale = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, D);
-    t.mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, KV, nq);
+    t.mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, kv, nq);
     const auto write_cache = [&](ggml_tensor * source) {
-        ggml_tensor * cache = ggml_new_tensor_2d(ctx, type, D*HK, KV);
+        ggml_tensor * cache = ggml_new_tensor_2d(ctx, type, D*HK, kv);
         ggml_tensor * written = ggml_set_rows(ctx, cache, source, t.rows);
         const int32_t group_size = D;
         std::memcpy(written->op_params, &group_size, sizeof(group_size));
@@ -259,7 +260,7 @@ graph_tensors make_graph(ggml_context * ctx, ggml_type type, int nq) {
     t.k = write_cache(t.k_source);
     t.v = write_cache(t.v_source);
     const auto attention_view = [&](ggml_tensor * cache) {
-        ggml_tensor * view = ggml_view_3d(ctx, cache, D, HK, KV,
+        ggml_tensor * view = ggml_view_3d(ctx, cache, D, HK, kv,
             ggml_row_size(type, D), ggml_row_size(type, D*HK), 0);
         return ggml_permute(ctx, view, 0, 2, 1, 3);
     };
@@ -273,37 +274,37 @@ graph_tensors make_graph(ggml_context * ctx, ggml_type type, int nq) {
     return t;
 }
 
-void initialize(const graph_tensors & t, const values & q, const values & k, const values & v, int nq) {
+void initialize(const graph_tensors & t, const values & q, const values & k, const values & v, int nq, int kv) {
     ggml_backend_tensor_set(t.q, q.data(), 0, q.size()*sizeof(float));
     ggml_backend_tensor_set(t.k_source, k.data(), 0, k.size()*sizeof(float));
     ggml_backend_tensor_set(t.v_source, v.data(), 0, v.size()*sizeof(float));
-    std::array<int64_t, KV> rows{};
-    for (int i = 0; i < KV; ++i) {
-        rows[i] = cache_row(i);
+    std::vector<int64_t> rows(kv);
+    for (int i = 0; i < kv; ++i) {
+        rows[i] = cache_row(i, kv);
     }
-    ggml_backend_tensor_set(t.rows, rows.data(), 0, sizeof(rows));
+    ggml_backend_tensor_set(t.rows, rows.data(), 0, rows.size()*sizeof(int64_t));
     std::array<float, D> ones{};
     ones.fill(1.0f);
     ggml_backend_tensor_set(t.scale, ones.data(), 0, sizeof(ones));
-    std::vector<ggml_fp16_t> mask(KV*nq);
+    std::vector<ggml_fp16_t> mask(kv*nq);
     for (int query = 0; query < nq; ++query) {
-        for (int logical = 0; logical < KV; ++logical) {
-            const float value = logical <= KV - nq + query ? 0.0f : -std::numeric_limits<float>::infinity();
-            mask[cache_row(logical) + KV*query] = ggml_fp32_to_fp16(value);
+        for (int logical = 0; logical < kv; ++logical) {
+            const float value = logical <= kv - nq + query ? 0.0f : -std::numeric_limits<float>::infinity();
+            mask[cache_row(logical, kv) + kv*query] = ggml_fp32_to_fp16(value);
         }
     }
     ggml_backend_tensor_set(t.mask, mask.data(), 0, mask.size()*sizeof(ggml_fp16_t));
 }
 
-bool run_case(ggml_backend_t backend, ggml_type type, int nq) {
-    std::printf("case type=%s nq=%d head=128 q_heads=16 kv_heads=8 kv=113\n", ggml_type_name(type), nq);
+bool run_case(ggml_backend_t backend, ggml_type type, int nq, int kv) {
+    std::printf("case type=%s nq=%d head=128 q_heads=16 kv_heads=8 kv=%d\n", ggml_type_name(type), nq, kv);
     const ggml_init_params params{ggml_tensor_overhead()*64 + ggml_graph_overhead_custom(64, false), nullptr, true};
     ggml_context_ptr ctx(ggml_init(params));
     if (!ctx) {
         std::printf("  FAIL: context allocation\n");
         return false;
     }
-    const graph_tensors t = make_graph(ctx.get(), type, nq);
+    const graph_tensors t = make_graph(ctx.get(), type, nq, kv);
     for (int i = 0; i < ggml_graph_n_nodes(t.graph); ++i) {
         ggml_tensor * node = ggml_graph_node(t.graph, i);
         if (!ggml_backend_supports_op(backend, node)) {
@@ -318,9 +319,9 @@ bool run_case(ggml_backend_t backend, ggml_type type, int nq) {
     }
     ggml_backend_buffer_clear(buffer.get(), 0);
     const values q = make_source(HQ, nq, 1);
-    const values k = make_source(HK, KV, 2);
-    const values v = make_source(HK, KV, 3);
-    initialize(t, q, k, v, nq);
+    const values k = make_source(HK, kv, 2);
+    const values v = make_source(HK, kv, 3);
+    initialize(t, q, k, v, nq, kv);
     if (ggml_backend_graph_compute(backend, t.graph) != GGML_STATUS_SUCCESS) {
         std::printf("  FAIL: graph execution\n");
         return false;
@@ -332,22 +333,22 @@ bool run_case(ggml_backend_t backend, ggml_type type, int nq) {
     const values actual_attention = read_f32(t.attended);
     const values actual_output = read_f32(t.output);
     const values expected_q = rotate(q);
-    const values quantized_attention = attention(expected_q, actual_k, actual_v, nq);
+    const values quantized_attention = attention(expected_q, actual_k, actual_v, nq, kv);
     const values quantized_output = rotate(quantized_attention, true);
     bool ok = true;
     // Keep the existing WHT, SET_ROWS and attention test tolerances, respectively.
     ok &= check_error("query_rotation", actual_q, expected_q, 1e-5);
-    ok &= check_error("key_write", actual_k, quantized_reference(k, type), 0.05);
-    ok &= check_error("value_write", actual_v, quantized_reference(v, type), 0.05);
-    ok &= check_norm("key_norm", actual_k, scatter(k));
-    ok &= check_norm("value_norm", actual_v, scatter(v));
-    ok &= check_error("attention_actual_cache", actual_attention, attention(actual_q, actual_k, actual_v, nq), 5e-4);
+    ok &= check_error("key_write", actual_k, quantized_reference(k, type, kv), 0.05);
+    ok &= check_error("value_write", actual_v, quantized_reference(v, type, kv), 0.05);
+    ok &= check_norm("key_norm", actual_k, scatter(k, kv));
+    ok &= check_norm("value_norm", actual_v, scatter(v, kv));
+    ok &= check_error("attention_actual_cache", actual_attention, attention(actual_q, actual_k, actual_v, nq, kv), 5e-4);
     ok &= check_error("inverse_rotation", actual_output, rotate(actual_attention, true), 1e-5);
     ok &= check_error("composed_actual_cache", actual_output, quantized_output, 5e-4);
-    const values original_output = attention(q, scatter(k), scatter(v), nq);
+    const values original_output = attention(q, scatter(k, kv), scatter(v, kv), nq, kv);
     std::printf("  diagnostic=quantization_only output_nmse=%.9g key_nmse=%.9g value_nmse=%.9g quality_gate=none\n",
-        nmse(quantized_output, original_output), nmse(rotate(actual_k, true), scatter(k)),
-        nmse(rotate(actual_v, true), scatter(v)));
+        nmse(quantized_output, original_output), nmse(rotate(actual_k, true), scatter(k, kv)),
+        nmse(rotate(actual_v, true), scatter(v, kv)));
     return ok;
 }
 
@@ -366,16 +367,19 @@ int main(int argc, char ** argv) {
     ggml_backend_ptr backend(ggml_backend_init_by_name(backend_name, nullptr));
     if (!backend) {
         std::fprintf(stderr, "FAIL: selected backend %s unavailable\n", backend_name);
-        std::printf("0/4 cases passed\n");
+        std::printf("0/8 cases passed\n");
         return 1;
     }
     std::printf("Backend %s\n", ggml_backend_name(backend.get()));
     int passed = 0;
-    for (ggml_type type : {GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO4_0}) {
-        for (int nq : {1, 32}) {
-            passed += run_case(backend.get(), type, nq) ? 1 : 0;
+    // 256 admits CUDA GQA packing and VEC selection; 113 keeps the unaligned cases.
+    for (int kv : {113, 256}) {
+        for (ggml_type type : {GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO4_0}) {
+            for (int nq : {1, 32}) {
+                passed += run_case(backend.get(), type, nq, kv) ? 1 : 0;
+            }
         }
     }
-    std::printf("%d/4 cases passed\n", passed);
-    return passed == 4 ? 0 : 1;
+    std::printf("%d/8 cases passed\n", passed);
+    return passed == 8 ? 0 : 1;
 }
