@@ -10642,9 +10642,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
 
     // F16 keys with Turbo values: decode, prefill, KV padding, layouts and attention features.
     for (ggml_type type_v : {GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO4_0}) {
-        for (int nr : {1, 2}) {
-            for (int kv : {113, 512}) {
+        for (int nr : {1, 2, 4}) {
+            for (int kv : {113, 512, 2049, 4097}) {
+                if ((nr == 4) != (kv > 512)) continue;
                 for (int nb : {1, 32}) {
+                    if (kv > 512 && nb != 1) continue; // long-context decode uses more Metal simdgroups
                     for (bool permuted : {false, true}) {
                         for (bool features : {false, true}) {
                             const std::array<int32_t, 4> permute = permuted ? std::array<int32_t, 4>{0, 2, 1, 3} : std::array<int32_t, 4>{0, 1, 2, 3};
