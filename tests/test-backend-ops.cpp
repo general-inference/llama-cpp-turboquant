@@ -7671,6 +7671,8 @@ struct test_flash_attn_ext : public test_case {
     }
 };
 
+#include "test-backend-ops-turbo4-gqa.h"
+
 struct test_flash_attn_ext_q8_turbo4_ne : public test_flash_attn_ext {
     using test_flash_attn_ext::test_flash_attn_ext;
 
@@ -10653,6 +10655,24 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                             GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_TURBO4_0, permute));
                     }
                 }
+            }
+        }
+    }
+
+    for (int kv : {113, 2048, 2049, 4096, 4097, 5120, 8192}) {
+        for (bool permuted : {false, true}) {
+            for (auto pattern : {test_flash_attn_ext_turbo4_gqa::mask_pattern::NONE,
+                                 test_flash_attn_ext_turbo4_gqa::mask_pattern::PARTIAL,
+                                 test_flash_attn_ext_turbo4_gqa::mask_pattern::ALL}) {
+                test_cases.emplace_back(new test_flash_attn_ext_turbo4_gqa(kv, permuted, pattern));
+            }
+        }
+    }
+    for (int kv : {113, 5120}) {
+        for (bool permuted : {false, true}) {
+            for (auto pattern : {test_flash_attn_ext_turbo4_gqa::mask_pattern::NONE,
+                                 test_flash_attn_ext_turbo4_gqa::mask_pattern::PARTIAL}) {
+                test_cases.emplace_back(new test_flash_attn_ext_turbo4_gqa(kv, permuted, pattern, true));
             }
         }
     }
