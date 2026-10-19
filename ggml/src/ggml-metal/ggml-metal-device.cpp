@@ -1653,6 +1653,9 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_v
         int32_t nwg) {
     assert(op->op == GGML_OP_FLASH_ATTN_EXT);
 
+    // Work around the observed M1 compiler failure for unpadded paired pipelines.
+    const bool effective_has_kvpad = has_kvpad || paired_heads;
+
     char base[256];
     char name[256];
 
@@ -1678,7 +1681,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_v
             has_sinks,
             has_bias,
             has_scap,
-            has_kvpad,
+            effective_has_kvpad,
             ns10,
             ns20,
             nsg, nwg);
@@ -1688,7 +1691,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_v
         ggml_metal_cv_t cv = ggml_metal_cv_init();
 
         ggml_metal_cv_set_bool(cv, has_mask,  FC_FLASH_ATTN_EXT_VEC + 0);
-        ggml_metal_cv_set_bool(cv, has_kvpad, FC_FLASH_ATTN_EXT_VEC + 4);
+        ggml_metal_cv_set_bool(cv, effective_has_kvpad, FC_FLASH_ATTN_EXT_VEC + 4);
 
         if (!paired_heads) {
             ggml_metal_cv_set_bool(cv, has_sinks, FC_FLASH_ATTN_EXT_VEC + 1);
