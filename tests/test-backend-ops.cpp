@@ -7717,7 +7717,7 @@ struct test_flash_attn_ext_q8_turbo4_prefill_encoded_v : public test_flash_attn_
 
     void initialize_tensors(ggml_context * ctx) override {
         test_flash_attn_ext::initialize_tensors(ctx);
-        // Zero, subnormal/normal boundaries, values around one, and large finite norms.
+        // Include zero, subnormal/normal boundaries, values around one, and the largest finite FP16 norm.
         const std::array<ggml_fp16_t, 10> norms = {0x0000, 0x0001, 0x03ff, 0x0400, 0x2400, 0x3bff, 0x3c00, 0x3c01, 0x5000, 0x7bff};
         for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
             if (strcmp(t->name, "v") != 0) {
@@ -7727,6 +7727,19 @@ struct test_flash_attn_ext_q8_turbo4_prefill_encoded_v : public test_flash_attn_
             const size_t row_size = ggml_row_size(t->type, t->ne[0]);
             GGML_ASSERT(row_size == sizeof(ggml_fp16_t) + 64 && t->nb[0] == row_size);
             std::vector<uint8_t> row(row_size);
+            for (int j = 0; j < 128; j += 2) {
+                row[sizeof(ggml_fp16_t) + j/2] = (j % 16) | (((j + 1) % 16) << 4);
+            }
+            std::array<float, 128> decoded;
+            // Check every norm and live centroid before writing rows; each product must fit in finite FP16.
+            for (ggml_fp16_t norm : norms) {
+                memcpy(row.data(), &norm, sizeof(norm));
+                ggml_get_type_traits(t->type)->to_float(row.data(), decoded.data(), decoded.size());
+                for (float value : decoded) {
+                    GGML_ASSERT(std::fabs(value) <= 65504.0f);
+                    GGML_ASSERT(std::isfinite(ggml_fp16_to_fp32(ggml_fp32_to_fp16(value))));
+                }
+            }
             for (int64_t i3 = 0; i3 < t->ne[3]; ++i3) {
                 for (int64_t i2 = 0; i2 < t->ne[2]; ++i2) {
                     for (int64_t i1 = 0; i1 < t->ne[1]; ++i1) {
