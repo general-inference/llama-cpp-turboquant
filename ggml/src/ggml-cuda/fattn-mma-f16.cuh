@@ -378,11 +378,19 @@ static __host__ int get_cols_per_warp(const int cc) {
 // ------------------------------------------------------------------------------------------------------------------
 
 static __host__ int ggml_cuda_fattn_mma_get_nstages(const int DKQ, const int DV, const int ncols1, const int ncols2, const int cc) {
+    // Diagnostic: match the synchronous device path and its shared-memory layout.
+    if (DKQ == 128 && DV == 128 && ncols1 == 32 && ncols2 == 2) {
+        return 0;
+    }
     return cp_async_available(cc) && ncols2 >= 2 ? ggml_cuda_fattn_mma_get_nstages_target(DKQ, DV, ncols1*ncols2, cc) : 0;
 }
 
 static constexpr __device__ int ggml_cuda_fattn_mma_get_nstages(
         const int DKQ, const int DV, const int ncols1, const int ncols2, const bool use_sparse) {
+    // Diagnostic: isolate synchronous F16 loading at the measured prefill shape.
+    if (DKQ == 128 && DV == 128 && ncols1 == 32 && ncols2 == 2) {
+        return 0;
+    }
 #ifdef CP_ASYNC_AVAILABLE
     const int nstages_target = ncols2 >= 2 ? ggml_cuda_fattn_mma_get_nstages_target(DKQ, DV, ncols1*ncols2) : 0;
     // sparse gather is not implemented for multi-stage loading
