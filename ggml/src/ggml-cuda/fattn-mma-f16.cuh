@@ -626,6 +626,48 @@ static __device__ __forceinline__ void flash_attn_ext_turbo4_load_tile(
     }
 }
 
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && TURBO4_USE_4BIT
+template<int stride_tile, bool swz, int nbatch_fa, int nthreads, bool oob_check>
+static __device__ __forceinline__ void flash_attn_ext_turbo4_load_tile_cooperative(
+        const char * const __restrict__ KV_raw, half2 * const __restrict__ tile_KV,
+        const int stride_bytes, const int i_sup) {
+    static_assert(sizeof(block_turbo4_0) == 66 && QK_TURBO4 == 128, "4-bit turbo4 layout expected");
+    static_assert(nthreads > 0 && nthreads % 32 == 0 && ggml_cuda_get_physical_warp_size() == 32, "full CUDA warps required");
+    const int lane = threadIdx.x;
+    const int l = lane % 16;
+    const float centroid = TURBO_CENTROIDS_4BIT_FATTN[l];
+
+    // Each half-warp decodes one row; both halves always reach every shuffle.
+    for (int row_pair = 2*threadIdx.y; row_pair < nbatch_fa; row_pair += 2*(nthreads/32)) {
+        const int row = row_pair + lane/16;
+        const bool valid = row < nbatch_fa && (!oob_check || row < i_sup);
+        uint32_t qs = 0;
+        float norm = 0.0f;
+        if (valid) {
+            const block_turbo4_0 * blk = (const block_turbo4_0 *) (KV_raw + int64_t(row)*stride_bytes);
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
+            norm = __half2float(__ldcs((const half *) &blk->norm));
+            qs = uint32_t(__ldcs((const uint16_t *) (blk->qs + 4*l))) |
+                (uint32_t(__ldcs((const uint16_t *) (blk->qs + 4*l + 2))) << 16);
+#else
+            norm = __half2float(blk->norm);
+            qs = uint32_t(*(const uint16_t *) (blk->qs + 4*l)) |
+                (uint32_t(*(const uint16_t *) (blk->qs + 4*l + 2)) << 16);
+#endif
+        }
+#pragma unroll
+        for (int m = 0; m < 8; m += 2) {
+            const float v0 = __shfl_sync(0xFFFFFFFF, centroid, (qs >> (4*m)) & 0xF, 32) * norm;
+            const float v1 = __shfl_sync(0xFFFFFFFF, centroid, (qs >> (4*(m + 1))) & 0xF, 32) * norm;
+            const half2 v = valid ? __floats2half2_rn(v0, v1) : make_half2(0.0f, 0.0f);
+            if (row < nbatch_fa) {
+                turbo_store_h2<stride_tile, swz>(tile_KV, row, 4*l + m/2, v);
+            }
+        }
+    }
+}
+#endif
+
 // turbo3 (3-bit PolarQuant) tile loader for the MMA decode path. 3-bit index = 2 low
 // bits (qs, 4/byte) + 1 high bit (signs, 8/byte); reconstruction byte-identical to
 // vec_dot_fattn_vec_KQ_turbo3_0. Same row / half2-col layout as the turbo4 loader.
@@ -1299,8 +1341,16 @@ static __device__ __forceinline__ void flash_attn_ext_f16_iter(
             constexpr int nthreads_turbo = nwarps * ggml_cuda_get_physical_warp_size();
             const char * V_raw = (const char *) V_h2 + int64_t(k_VKQ_0) * stride_V;
             if constexpr (type_V == GGML_TYPE_TURBO4_0) {
-                flash_attn_ext_turbo4_load_tile<stride_tile_V, swz_V, nbatch_fa, nthreads_turbo, oob_check>
-                    (V_raw, tile_V, i0_diff/2, stride_V, i0_start/2, k_VKQ_sup);
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && TURBO4_USE_4BIT
+                if constexpr (type_K == GGML_TYPE_Q8_0 && DKQ == 128 && DV == 128 && ncols1 == 32 && ncols2 == 2) {
+                    flash_attn_ext_turbo4_load_tile_cooperative<stride_tile_V, swz_V, nbatch_fa, nthreads_turbo, oob_check>
+                        (V_raw, tile_V, stride_V, k_VKQ_sup);
+                } else
+#endif
+                {
+                    flash_attn_ext_turbo4_load_tile<stride_tile_V, swz_V, nbatch_fa, nthreads_turbo, oob_check>
+                        (V_raw, tile_V, i0_diff/2, stride_V, i0_start/2, k_VKQ_sup);
+                }
             } else if constexpr (type_V == GGML_TYPE_TURBO3_0) {
                 flash_attn_ext_turbo3_load_tile<stride_tile_V, swz_V, nbatch_fa, nthreads_turbo, oob_check>
                     (V_raw, tile_V, i0_diff/2, stride_V, i0_start/2, k_VKQ_sup);
