@@ -7671,6 +7671,14 @@ struct test_flash_attn_ext : public test_case {
     }
 };
 
+struct test_flash_attn_ext_f16_turbo : public test_flash_attn_ext {
+    using test_flash_attn_ext::test_flash_attn_ext;
+
+    std::string vars() override {
+        return "f16_turbo_" + test_flash_attn_ext::vars();
+    }
+};
+
 struct test_flash_attn_ext_turbo4_vec : public test_flash_attn_ext {
     const int64_t head_dim;
 
@@ -10625,6 +10633,24 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                                     }
                                 }
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // F16 keys with Turbo values: decode, prefill, KV padding, layouts and attention features.
+    for (ggml_type type_v : {GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO4_0}) {
+        for (int nr : {1, 2}) {
+            for (int kv : {113, 512}) {
+                for (int nb : {1, 32}) {
+                    for (bool permuted : {false, true}) {
+                        for (bool features : {false, true}) {
+                            const std::array<int32_t, 4> permute = permuted ? std::array<int32_t, 4>{0, 2, 1, 3} : std::array<int32_t, 4>{0, 1, 2, 3};
+                            test_cases.emplace_back(new test_flash_attn_ext_f16_turbo(
+                                128, 128, 4, {nr, 1}, kv, nb, features, features, features ? 1.0f : 0.0f, features ? 10.0f : 0.0f,
+                                GGML_PREC_F32, GGML_TYPE_F16, type_v, permute));
                         }
                     }
                 }
