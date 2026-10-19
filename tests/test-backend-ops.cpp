@@ -10642,7 +10642,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
 
     // Q8/Turbo4 vec batches through the dispatch boundary, with prefill controls.
     for (int nr : {2, 4}) {
-        for (int kv : {113, 512, 2049, 4097}) {
+        for (int kv : {113, 512, 2049, 4097, 5120}) {
             for (int nb : {1, 2, 19, 32}) {
                 if (kv > 512 && nb == 32) continue;
                 for (bool permuted : {false, true}) {
