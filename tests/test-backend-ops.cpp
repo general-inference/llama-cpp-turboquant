@@ -7708,6 +7708,45 @@ struct test_flash_attn_ext_q8_turbo4_prefill : public test_flash_attn_ext {
     }
 };
 
+struct test_flash_attn_ext_q8_turbo4_prefill_encoded_v : public test_flash_attn_ext_q8_turbo4_prefill {
+    using test_flash_attn_ext_q8_turbo4_prefill::test_flash_attn_ext_q8_turbo4_prefill;
+
+    std::string vars() override {
+        return "q8_turbo4_prefill_encoded_v_" + test_flash_attn_ext::vars();
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        test_flash_attn_ext::initialize_tensors(ctx);
+        // Zero, subnormal/normal boundaries, values around one, and large finite norms.
+        const std::array<ggml_fp16_t, 10> norms = {0x0000, 0x0001, 0x03ff, 0x0400, 0x2400, 0x3bff, 0x3c00, 0x3c01, 0x5000, 0x7bff};
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
+            if (strcmp(t->name, "v") != 0) {
+                continue;
+            }
+            GGML_ASSERT(t->type == GGML_TYPE_TURBO4_0 && t->ne[0] == 128);
+            const size_t row_size = ggml_row_size(t->type, t->ne[0]);
+            GGML_ASSERT(row_size == sizeof(ggml_fp16_t) + 64 && t->nb[0] == row_size);
+            std::vector<uint8_t> row(row_size);
+            for (int64_t i3 = 0; i3 < t->ne[3]; ++i3) {
+                for (int64_t i2 = 0; i2 < t->ne[2]; ++i2) {
+                    for (int64_t i1 = 0; i1 < t->ne[1]; ++i1) {
+                        const ggml_fp16_t norm = norms[(i1 + 3*i2 + 7*i3) % norms.size()];
+                        memcpy(row.data(), &norm, sizeof(norm));
+                        auto code = [&](int j) {
+                            return uint8_t((j + 3*(j/8) + 5*(j/32) + 7*i1 + 3*i2 + i3) % 16);
+                        };
+                        for (int j = 0; j < 128; j += 2) {
+                            row[sizeof(norm) + j/2] = code(j) | (code(j + 1) << 4);
+                        }
+                        const size_t offset = i1*t->nb[1] + i2*t->nb[2] + i3*t->nb[3];
+                        ggml_backend_tensor_set(t, row.data(), offset, row.size());
+                    }
+                }
+            }
+        }
+    }
+};
+
 struct test_flash_attn_ext_turbo4_vec : public test_flash_attn_ext {
     const int64_t head_dim;
 
@@ -10710,6 +10749,17 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         add(128, 2, 256, 32, false, false, 0, 0);
         add(128, 2, 256, 32, true, false, 8, 0);
         add(256, 2, 256, 32, true, false, 0, 0);
+    }
+
+    for (int layout : {0, 1, 2}) {
+        const std::array<int32_t, 4> permute = layout == 2 ? std::array<int32_t, 4>{0, 2, 1, 3} : std::array<int32_t, 4>{0, 1, 2, 3};
+        for (int nb : {32, 512}) {
+            for (int kv : {256, 5120}) {
+                test_cases.emplace_back(new test_flash_attn_ext_q8_turbo4_prefill_encoded_v(
+                    128, 128, 2, {2, 1}, kv, nb, true, false, 0, 0,
+                    GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_TURBO4_0, permute, layout != 0));
+            }
+        }
     }
 
     // mixed quant and Q1_0 test cases
