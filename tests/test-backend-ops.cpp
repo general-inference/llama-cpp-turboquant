@@ -10640,11 +10640,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         }
     }
 
-    // Q8/Turbo4 decode at each Metal simdgroup count, with prefill controls.
+    // Q8/Turbo4 vec batches through the dispatch boundary, with prefill controls.
     for (int nr : {2, 4}) {
         for (int kv : {113, 512, 2049, 4097}) {
-            for (int nb : {1, 32}) {
-                if (kv > 512 && nb != 1) continue;
+            for (int nb : {1, 2, 19, 32}) {
+                if (kv > 512 && nb == 32) continue;
                 for (bool permuted : {false, true}) {
                     for (bool features : {false, true}) {
                         const std::array<int32_t, 4> permute = permuted ? std::array<int32_t, 4>{0, 2, 1, 3} : std::array<int32_t, 4>{0, 1, 2, 3};
