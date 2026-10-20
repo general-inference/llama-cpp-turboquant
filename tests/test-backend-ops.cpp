@@ -2639,6 +2639,8 @@ struct test_turbo_wht_roundtrip : public test_case {
     }
 };
 
+#include "test-backend-ops-wht-decode.h"
+
 // Test SET_ROWS with turbo3 destination, then dequantize and compare.
 // This validates the full quantization pipeline: f32 -> WHT -> PolarQuant -> turbo3
 // followed by dequantization: turbo3 -> f32. The round-trip error should be bounded.
@@ -8992,6 +8994,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_set_rows(GGML_TYPE_F16, GGML_TYPE_F16, GGML_TYPE_I64, { 1, 8, 1, 3 }, { 1, 1 }, 2, true));
     test_cases.emplace_back(new test_set_rows(GGML_TYPE_F16, GGML_TYPE_F16, GGML_TYPE_I32, { 1, 8, 1, 3 }, { 1, 1 }, 2, true));
 
+    add_turbo_wht_decode_tests(test_cases);
+
     // TURBO_WHT tests
     for (int dir : {0, 1}) {
         for (int64_t hd : {128, 256, 512}) {
@@ -10891,6 +10895,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
 // Test cases for performance evaluation: should be representative of real-world use cases
 static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
     std::vector<std::unique_ptr<test_case>> test_cases;
+
+    for (int64_t groups : {16, 32}) {
+        test_cases.emplace_back(new test_turbo_wht_decode(groups, 1, 3));
+    }
 
     // elementwise chain vs the tuned multi-ADD kernel (GGML_CUDA_FUSE_CHAIN=0 to compare)
     test_cases.emplace_back(new test_elem_chain_fusion({4096, 64, 1, 1}, false, false, true));
