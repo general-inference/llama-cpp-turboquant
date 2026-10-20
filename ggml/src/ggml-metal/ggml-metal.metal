@@ -9236,7 +9236,11 @@ kernel void kernel_flash_attn_ext_vec(
 #undef NS20
 }
 
+#if __METAL_VERSION__ >= 320
+kernel void kernel_flash_attn_ext_vec_pair_kq8_0_vturbo4_dk128_dv128_regacc(
+#else
 kernel void kernel_flash_attn_ext_vec_pair_kq8_0_vturbo4_dk128_dv128(
+#endif
         constant ggml_metal_kargs_flash_attn_ext_vec & args,
         device const char * q,
         device const char * k,
@@ -9275,8 +9279,13 @@ kernel void kernel_flash_attn_ext_vec_pair_kq8_0_vturbo4_dk128_dv128(
         sq0[tiisg] = half4(((device const float4 *) (q + head0*args.nb02))[tiisg]);
         sq1[tiisg] = half4(((device const float4 *) (q + (head0 + 1)*args.nb02))[tiisg]);
     }
+#if __METAL_VERSION__ >= 320
+    float4 acc0 = float4(0.0f);
+    float4 acc1 = float4(0.0f);
+#else
     so0[tiisg] = float4(0.0f);
     so1[tiisg] = float4(0.0f);
+#endif
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     float S0 = 0.0f;
@@ -9356,8 +9365,10 @@ kernel void kernel_flash_attn_ext_vec_pair_kq8_0_vturbo4_dk128_dv128(
         S1 = S1*ms1 + simd_sum(vs1);
         ss0[tiisg] = vs0;
         ss1[tiisg] = vs1;
+#if __METAL_VERSION__ < 320
         so0[tiisg] *= ms0;
         so1[tiisg] *= ms1;
+#endif
         simdgroup_barrier(mem_flags::mem_threadgroup);
 
         // Each lane owns four output dimensions and visits all 32 cache rows.
@@ -9386,10 +9397,26 @@ kernel void kernel_flash_attn_ext_vec_pair_kq8_0_vturbo4_dk128_dv128(
                 lo1 += float4(mv)*weight1;
             }
         }
+#if __METAL_VERSION__ >= 320
+        {
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(off)
+            // Keep the separate multiply/add rounding of the shared accumulator.
+            acc0 *= ms0;
+            acc1 *= ms1;
+            acc0 += lo0;
+            acc1 += lo1;
+        }
+#else
         so0[tiisg] += lo0;
         so1[tiisg] += lo1;
+#endif
     }
 
+#if __METAL_VERSION__ >= 320
+    so0[tiisg] = acc0;
+    so1[tiisg] = acc1;
+#endif
     if (tiisg == 0) {
         ss0[0] = S0;
         ss0[1] = M0;

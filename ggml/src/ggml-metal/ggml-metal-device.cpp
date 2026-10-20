@@ -1656,6 +1656,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_v
 
     // Work around the observed M1 compiler failure for unpadded paired pipelines.
     const bool effective_has_kvpad = has_kvpad || paired_heads;
+    const bool paired_regacc = paired_heads && ggml_metal_library_has_paired_regacc(lib);
 
     char base[256];
     char name[256];
@@ -1668,12 +1669,13 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_v
 
     // Asymmetric K/V: always encode both K and V types in the pipeline name.
     // Uses k/v prefix to avoid ambiguity with type names containing underscores.
-    snprintf(base, 256, "kernel_%s_k%s_v%s_dk%d_dv%d",
+    snprintf(base, 256, "kernel_%s_k%s_v%s_dk%d_dv%d%s",
             paired_heads ? "flash_attn_ext_vec_pair" : "flash_attn_ext_vec",
             ggml_type_name(op->src[1]->type),
             ggml_type_name(op->src[2]->type),
             dk,
-            dv);
+            dv,
+            paired_regacc ? "_regacc" : "");
 
 
     snprintf(name, 256, "%s_mask=%d_sink=%d_bias=%d_scap=%d_kvpad=%d_ns10=%d_ns20=%d_nsg=%d_nwg=%d",
