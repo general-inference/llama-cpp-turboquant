@@ -7672,6 +7672,7 @@ struct test_flash_attn_ext : public test_case {
 };
 
 #include "test-backend-ops-turbo4-gqa.h"
+#include "test-backend-ops-attention-decode.h"
 
 struct test_flash_attn_ext_q8_turbo4_ne : public test_flash_attn_ext {
     using test_flash_attn_ext::test_flash_attn_ext;
@@ -8832,6 +8833,8 @@ static const ggml_type other_types[] = {
 // Test cases for evaluation: should try to cover edge cases while using small input sizes to keep the runtime low
 static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     std::vector<std::unique_ptr<test_case>> test_cases;
+
+    add_attention_decode_diagnostics(test_cases);
 
     // multi-node fusion coverage: residual epilogue, shared-quantize cache, elementwise chain, MoE reduce
     for (ggml_type type : {GGML_TYPE_Q8_0, GGML_TYPE_Q4_0, GGML_TYPE_TQ4_1S}) {
@@ -10891,6 +10894,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
 // Test cases for performance evaluation: should be representative of real-world use cases
 static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
     std::vector<std::unique_ptr<test_case>> test_cases;
+
+    add_attention_decode_diagnostics(test_cases);
 
     // elementwise chain vs the tuned multi-ADD kernel (GGML_CUDA_FUSE_CHAIN=0 to compare)
     test_cases.emplace_back(new test_elem_chain_fusion({4096, 64, 1, 1}, false, false, true));
