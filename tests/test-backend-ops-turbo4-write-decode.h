@@ -34,12 +34,9 @@ struct test_set_rows_turbo4_decode : public test_case {
         ggml_set_name(index, "write_index");
         auto * written = ggml_set_rows(ctx, cache, source, index);
         ggml_set_name(written, "write_result");
-        if (mode == MODE_PERF) {
-            return written;
-        }
-        auto * out = ggml_cpy(ctx, written, ggml_new_tensor_2d(ctx, GGML_TYPE_F32, width, cache_rows));
-        ggml_set_name(out, "write_readback");
-        return out;
+        // The comparison harness reads and dequantizes the full cache on the CPU.
+        // Metal does not support a TURBO4-to-F32 CPY node.
+        return written;
     }
 
     size_t op_size(ggml_tensor * t) override {
@@ -79,10 +76,6 @@ struct test_set_rows_turbo4_decode : public test_case {
         GGML_ASSERT(row_bytes == 528);
         // A skipped write leaves NaN norms in every target block.
         ggml_backend_tensor_memset(cache, 0xff, row*cache->nb[1], row_bytes);
-        if (auto * out = ggml_get_tensor(ctx, "write_readback")) {
-            ggml_backend_tensor_memset(out, 0xff, 0, ggml_nbytes(out));
-        }
-
         fprintf(stderr, "TQ_T4_WRITE_INPUT index_type=%s cache_rows=%lld row=%lld pattern=%d input_bytes=%zu blocks=8 packed_row_bytes=%zu source_fnv1a64=%016llx index_fnv1a64=%016llx\n",
                 ggml_type_name(type_idx), (long long) cache_rows, (long long) row, pattern, sizeof(values), row_bytes,
                 (unsigned long long) fingerprint(values.data(), sizeof(values)),
