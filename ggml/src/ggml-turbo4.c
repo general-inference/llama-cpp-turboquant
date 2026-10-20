@@ -123,6 +123,9 @@ void quantize_row_turbo4_0_ref(const float * GGML_RESTRICT x, block_turbo4_0 * G
         for (int i = 0; i < d; i++) {
             y[block].qs[i / 2] |= (uint8_t)((indices[i] & 0xF) << ((i % 2) * 4));
         }
+        if (GGML_FP16_TO_FP32(y[block].norm) == 0.0f) {
+            memset(y[block].qs, 0, sizeof(y[block].qs));
+        }
     }
 }
 

@@ -65,6 +65,11 @@ static int test_turbo4_scale() {
                 const double old_error = turbo4_scale_error(input, direction, old_scale);
                 const double tolerance = energy*1e-10;
                 bool ok = std::isfinite(scale) && scale >= 0 && std::isfinite(error) && error <= old_error + tolerance;
+                if (scale == 0) {
+                    for (size_t i = 2; i < packed.size(); ++i) {
+                        ok &= packed[i] == 0;
+                    }
+                }
                 if (energy > 1e-20) {
                     // The direct double matrix is independent of the production float butterfly.
                     const double ideal = projection/length;

@@ -231,6 +231,9 @@ kernel void kernel_set_rows_turbo4(
         }
 
         blk.norm = half((recon_norm_sq > 1e-20f) ? grp_norm * (projection / recon_norm_sq) : 0.0f);
+        if (blk.norm == half(0)) {
+            for (int j = 0; j < QK_TURBO4 / 2; ++j) blk.qs[j] = 0;
+        }
     }
 }
 
@@ -307,6 +310,9 @@ kernel void kernel_set_rows_turbo4_simd(
             projection += rotated[j] * c;
         }
         blk.norm = half((recon_norm_sq > 1e-20f) ? grp_norm * (projection / recon_norm_sq) : 0.0f);
+        if (blk.norm == half(0)) {
+            for (int j = 0; j < QK_TURBO4 / 2; ++j) blk.qs[j] = 0;
+        }
     }
 }
 
