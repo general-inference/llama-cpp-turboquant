@@ -3932,6 +3932,78 @@ kernel void kernel_turbo_wht_inverse_simd(
     dst[offset + 3] = out.w;
 }
 
+kernel void kernel_turbo_wht_inverse_f32(
+        constant ggml_metal_kargs_turbo_wht & args,
+        device const float * src [[buffer(1)]],
+        device       float * dst [[buffer(2)]],
+        uint tgpig [[threadgroup_position_in_grid]],
+        uint tiitg [[thread_index_in_threadgroup]],
+        uint ntg   [[threads_per_threadgroup]]) {
+    const uint64_t group = uint64_t(tgpig)*ntg + tiitg;
+    if (group >= args.n_elements/128) {
+        return;
+    }
+    device const float * in = src + group*128;
+    device       float * out = dst + group*128;
+    float4 x[32];
+    for (int i = 0; i < 32; ++i) {
+        x[i] = float4(in[i*4], in[i*4 + 1], in[i*4 + 2], in[i*4 + 3]) * float4(turbo_wht_signs2_h4[i]);
+    }
+    for (int i = 0; i < 32; ++i) {
+        const float4 a = x[i];
+        x[i] = float4(a.x + a.y, a.x - a.y, a.z + a.w, a.z - a.w);
+    }
+    for (int i = 0; i < 32; ++i) {
+        const float4 a = x[i];
+        x[i] = float4(a.x + a.z, a.y + a.w, a.x - a.z, a.y - a.w);
+    }
+    for (int stride = 1; stride < 32; stride *= 2) {
+        for (int i = 0; i < 32; ++i) {
+            if (i % (2*stride) < stride) {
+                const float4 a = x[i];
+                const float4 b = x[i + stride];
+                x[i] = a + b;
+                x[i + stride] = a - b;
+            }
+        }
+    }
+    for (int i = 0; i < 32; ++i) {
+        const float4 f = x[i] * 0.08838834764831845f * float4(turbo_wht_signs1_h4[i]);
+        out[i*4] = f.x;
+        out[i*4 + 1] = f.y;
+        out[i*4 + 2] = f.z;
+        out[i*4 + 3] = f.w;
+    }
+}
+
+kernel void kernel_turbo_wht_inverse_simd_f32(
+        constant ggml_metal_kargs_turbo_wht & args,
+        device const float * src [[buffer(1)]],
+        device       float * dst [[buffer(2)]],
+        uint group [[threadgroup_position_in_grid]],
+        ushort lane [[thread_index_in_simdgroup]]) {
+    if (group >= args.n_elements/128) {
+        return;
+    }
+    const uint64_t offset = uint64_t(group)*128 + uint64_t(lane)*4;
+    float4 x = float4(src[offset], src[offset + 1], src[offset + 2], src[offset + 3]) * float4(turbo_wht_signs2_h4[lane]);
+    x = float4(x.x + x.y, x.x - x.y, x.z + x.w, x.z - x.w);
+    x = float4(x.x + x.z, x.y + x.w, x.x - x.z, x.y - x.w);
+    for (ushort step = 1; step < 32; step *= 2) {
+        const float4 partner = float4(
+            simd_shuffle_xor(x.x, step),
+            simd_shuffle_xor(x.y, step),
+            simd_shuffle_xor(x.z, step),
+            simd_shuffle_xor(x.w, step));
+        x = (lane & step) == 0 ? x + partner : partner - x;
+    }
+    const float4 out = x * 0.08838834764831845f * float4(turbo_wht_signs1_h4[lane]);
+    dst[offset] = out.x;
+    dst[offset + 1] = out.y;
+    dst[offset + 2] = out.z;
+    dst[offset + 3] = out.w;
+}
+
 constant short FC_solve_tri_nsg [[function_constant(FC_SOLVE_TRI + 0)]];
 constant short FC_solve_tri_n   [[function_constant(FC_SOLVE_TRI + 1)]];
 constant short FC_solve_tri_k   [[function_constant(FC_SOLVE_TRI + 2)]];

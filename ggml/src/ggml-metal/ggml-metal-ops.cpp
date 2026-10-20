@@ -1882,13 +1882,15 @@ int ggml_metal_op_turbo_wht(ggml_metal_op_t ctx, int idx) {
     const int64_t n_groups = n_elements / 128;
 
     const auto * props_dev = ggml_metal_device_get_props(ctx->dev);
-    const bool simd_inverse = props_dev->has_simdgroup_reduction &&
+    const bool inverse_128 =
         direction == 1 && group_size == 128 && op->src[1] == nullptr &&
         op->src[0]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32 &&
         ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op) &&
-        n_groups > 0 && n_groups <= 64;
+        n_groups > 0;
+    const bool f32_inverse = inverse_128 && op->src[0]->ne[0] % 128 == 0;
+    const bool simd_inverse = props_dev->has_simdgroup_reduction && inverse_128 && n_groups <= 64;
 
-    auto pipeline = ggml_metal_library_get_pipeline_turbo_wht(lib, simd_inverse);
+    auto pipeline = ggml_metal_library_get_pipeline_turbo_wht(lib, simd_inverse, f32_inverse);
 
     ggml_metal_kargs_turbo_wht args = {
         /*.n_elements =*/ n_elements,
@@ -1903,6 +1905,7 @@ int ggml_metal_op_turbo_wht(ggml_metal_op_t ctx, int idx) {
 
     // Small inverse transforms use one SIMD group per 128 values.
     const int threads_per_tg = simd_inverse ? 32 : 256;
+    GGML_ASSERT(threads_per_tg <= ggml_metal_pipeline_max_theads_per_threadgroup(pipeline));
     const int n_threadgroups = simd_inverse ? n_groups : (n_groups + threads_per_tg - 1) / threads_per_tg;
     ggml_metal_encoder_dispatch_threadgroups(enc, n_threadgroups, 1, 1, threads_per_tg, 1, 1);
 
