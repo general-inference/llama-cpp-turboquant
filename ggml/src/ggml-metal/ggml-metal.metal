@@ -9236,7 +9236,7 @@ kernel void kernel_flash_attn_ext_vec(
 #undef NS20
 }
 
-kernel void kernel_flash_attn_ext_vec_gqa2_kq8_0_vturbo4_dk128_dv128(
+kernel void kernel_flash_attn_ext_vec_pair_kq8_0_vturbo4_dk128_dv128(
         constant ggml_metal_kargs_flash_attn_ext_vec & args,
         device const char * q,
         device const char * k,
@@ -9255,8 +9255,8 @@ kernel void kernel_flash_attn_ext_vec_gqa2_kq8_0_vturbo4_dk128_dv128(
 #define NSG (FC_flash_attn_ext_vec_nsg)
 
     const short iwg = tgpig[2];
-    const uint ikv2 = tgpig[1];
-    const uint head0 = 2*ikv2;
+    const uint head0 = 2*tgpig[1];
+    const uint ikv2 = head0/(args.ne02/args.ne_12_2);
     const short tx = tiisg%8;
     const short ty = tiisg/8;
 
