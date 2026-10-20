@@ -7677,6 +7677,7 @@ struct test_flash_attn_ext : public test_case {
 };
 
 #include "test-backend-ops-turbo4-gqa.h"
+#include "test-backend-ops-f16-mixed-attention.h"
 
 struct test_flash_attn_ext_q8_turbo4_ne : public test_flash_attn_ext {
     using test_flash_attn_ext::test_flash_attn_ext;
@@ -10688,6 +10689,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             }
         }
     }
+
+    add_f16_mixed_attention_tests(test_cases);
 
     // mixed quant and Q1_0 test cases
     test_cases.emplace_back(new test_flash_attn_ext(64, 64, 4, {1, 1}, 128, 2, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q4_0));

@@ -8,9 +8,10 @@ struct test_flash_attn_ext_turbo4_gqa : public test_flash_attn_ext {
     const bool opposed_queries;
     const int head_repeat;
 
-    test_flash_attn_ext_turbo4_gqa(int64_t kv, bool permuted, mask_pattern pattern, bool opposed_queries = false, int head_repeat = 2)
+    test_flash_attn_ext_turbo4_gqa(int64_t kv, bool permuted, mask_pattern pattern, bool opposed_queries = false, int head_repeat = 2,
+                                 ggml_type type_k = GGML_TYPE_Q8_0, ggml_type type_v = GGML_TYPE_TURBO4_0)
         : test_flash_attn_ext(128, 128, 8, {head_repeat, 1}, kv, 1, pattern != mask_pattern::NONE, false, 0, 0,
-              GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_TURBO4_0,
+              GGML_PREC_F32, type_k, type_v,
               permuted ? std::array<int32_t, 4>{0, 2, 1, 3} : std::array<int32_t, 4>{0, 1, 2, 3}),
           pattern(pattern), opposed_queries(opposed_queries), head_repeat(head_repeat) {
         GGML_ASSERT(head_repeat == 2 || head_repeat == 4);
