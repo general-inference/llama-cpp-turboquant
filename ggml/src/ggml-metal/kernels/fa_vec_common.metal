@@ -129,9 +129,11 @@ kernel void kernel_flash_attn_ext_vec(
     }
 
     // zero out so
-    for (short qq = 0; qq < Q; ++qq) {
-        for (short i = 0; i < DV4/NL; ++i) {
-            so4[qq*DV4 + i*NL] = (o4_t) 0.0f;
+    if (tiisg < NL) {
+        for (short qq = 0; qq < Q; ++qq) {
+            for (short i = 0; i < DV4/NL; ++i) {
+                so4[qq*DV4 + i*NL] = (o4_t) 0.0f;
+            }
         }
     }
 
