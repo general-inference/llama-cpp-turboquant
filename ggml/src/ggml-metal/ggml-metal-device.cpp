@@ -2017,7 +2017,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_v
             dv,
             qne_suffix);
     if (op->src[2]->type == GGML_TYPE_TURBO4_0) {
-        GGML_ASSERT(nqpsg == 1 && ne == (op->src[1]->type == GGML_TYPE_F16 ? 1 : 4));
+        GGML_ASSERT(nqpsg == 1 && ne == 4);
         snprintf(base, sizeof(base), "kernel_flash_attn_ext_vec%s_k%s_vturbo4_dk%d_dv%d",
                 paired_heads ? "_pair" : "", type, dk, dv);
     }

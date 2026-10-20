@@ -3925,9 +3925,6 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
 
         if (op->src[2]->type == GGML_TYPE_TURBO4_0) {
             cfg = {1, 4};
-            if (op->src[1]->type == GGML_TYPE_F16) {
-                cfg.NE = 1;
-            }
         }
         int nqptg = cfg.Q; // queries per threadgroup
 

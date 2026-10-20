@@ -215,4 +215,4 @@ kernel void kernel_flash_attn_ext_vec_pair_kq8_0_vturbo4_dk128_dv128(
 
 typedef decltype(kernel_flash_attn_ext_vec<FA_TYPES, block_q8_0, 8, dequantize_q8_0_t4, block_turbo4_0, 32, dequantize_turbo4_0_t4, 128, 128, 4>) flash_attn_turbo4_vec_t;
 template [[host_name("kernel_flash_attn_ext_vec_kq8_0_vturbo4_dk128_dv128")]] kernel flash_attn_turbo4_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_q8_0, 8, dequantize_q8_0_t4, block_turbo4_0, 32, dequantize_turbo4_0_t4, 128, 128, 4>;
-template [[host_name("kernel_flash_attn_ext_vec_kf16_vturbo4_dk128_dv128")]] kernel flash_attn_turbo4_vec_t kernel_flash_attn_ext_vec<FA_TYPES, half4, 1, dequantize_f16_t4, block_turbo4_0, 32, dequantize_turbo4_0_t4, 128, 128, 1>;
+template [[host_name("kernel_flash_attn_ext_vec_kf16_vturbo4_dk128_dv128")]] kernel flash_attn_turbo4_vec_t kernel_flash_attn_ext_vec<FA_TYPES, half4, 1, dequantize_f16_t4, block_turbo4_0, 32, dequantize_turbo4_0_t4, 128, 128, 4>;
