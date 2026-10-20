@@ -114,8 +114,23 @@ private:
             std::vector<uint8_t> cpu(row_bytes);
             ggml_quantize_chunk(GGML_TYPE_TURBO4_0, input.data(), cpu.data(), 0, 1, width, nullptr);
             if (memcmp(a.data() + row*row_bytes, cpu.data(), row_bytes) != 0) {
-                fprintf(stderr, "TQ_T4_WRITE_BYTES CPU scale or code mismatch row=%lld pattern=%d\n",
-                        (long long) row, pattern);
+                for (size_t block = 0; block < row_bytes/66; ++block) {
+                    const uint8_t * actual = a.data() + row*row_bytes + block*66;
+                    const uint8_t * expected = cpu.data() + block*66;
+                    if (memcmp(actual, expected, 66) == 0) {
+                        continue;
+                    }
+                    size_t first = 0;
+                    while (actual[first] == expected[first]) {
+                        ++first;
+                    }
+                    ggml_fp16_t actual_norm, expected_norm;
+                    memcpy(&actual_norm, actual, 2);
+                    memcpy(&expected_norm, expected, 2);
+                    fprintf(stderr, "TQ_T4_WRITE_BYTES CPU mismatch row=%lld pattern=%d block=%zu byte=%zu actual=%u expected=%u actual_norm=%.9g expected_norm=%.9g\n",
+                            (long long) row, pattern, block, first, unsigned(actual[first]),
+                            unsigned(expected[first]), ggml_fp16_to_fp32(actual_norm), ggml_fp16_to_fp32(expected_norm));
+                }
                 return false;
             }
         }
