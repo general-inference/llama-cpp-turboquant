@@ -6,17 +6,21 @@ struct test_flash_attn_ext_turbo4_gqa : public test_flash_attn_ext {
 
     const mask_pattern pattern;
     const bool opposed_queries;
+    const int head_repeat;
 
-    test_flash_attn_ext_turbo4_gqa(int64_t kv, bool permuted, mask_pattern pattern, bool opposed_queries = false)
-        : test_flash_attn_ext(128, 128, 8, {2, 1}, kv, 1, pattern != mask_pattern::NONE, false, 0, 0,
+    test_flash_attn_ext_turbo4_gqa(int64_t kv, bool permuted, mask_pattern pattern, bool opposed_queries = false, int head_repeat = 2)
+        : test_flash_attn_ext(128, 128, 8, {head_repeat, 1}, kv, 1, pattern != mask_pattern::NONE, false, 0, 0,
               GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_TURBO4_0,
               permuted ? std::array<int32_t, 4>{0, 2, 1, 3} : std::array<int32_t, 4>{0, 1, 2, 3}),
-          pattern(pattern), opposed_queries(opposed_queries) {}
+          pattern(pattern), opposed_queries(opposed_queries), head_repeat(head_repeat) {
+        GGML_ASSERT(head_repeat == 2 || head_repeat == 4);
+    }
 
     std::string vars() override {
         const char * mask_name = pattern == mask_pattern::NONE ? "none" :
                                 pattern == mask_pattern::PARTIAL ? "partial" : "all";
-        return "q8_turbo4_paired_" + test_flash_attn_ext::vars() + ",mask_pattern=" + mask_name +
+        const std::string prefix = head_repeat == 4 ? "q8_turbo4_paired_gqa4_" : "q8_turbo4_paired_";
+        return prefix + test_flash_attn_ext::vars() + ",mask_pattern=" + mask_name +
                ",opposed_queries=" + (opposed_queries ? "true" : "false");
     }
 
@@ -29,14 +33,14 @@ struct test_flash_attn_ext_turbo4_gqa : public test_flash_attn_ext {
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
         ggml_tensor * grouped = test_flash_attn_ext::build_graph(ctx);
-        ggml_set_name(grouped, "gqa2");
+        ggml_set_name(grouped, head_repeat == 4 ? "gqa4" : "gqa2");
 
-        ggml_tensor * k_copy = ggml_new_tensor_4d(ctx, type_K, hsk, kv, 2*nh, 1);
-        ggml_tensor * v_copy = ggml_new_tensor_4d(ctx, type_V, hsv, kv, 2*nh, 1);
+        ggml_tensor * k_copy = ggml_new_tensor_4d(ctx, type_K, hsk, kv, head_repeat*nh, 1);
+        ggml_tensor * v_copy = ggml_new_tensor_4d(ctx, type_V, hsv, kv, head_repeat*nh, 1);
         ggml_set_name(k_copy, "k_gqa1");
         ggml_set_name(v_copy, "v_gqa1");
 
-        // GQA1 uses the same query and duplicated packed KV, bypassing a GQA2-only kernel.
+        // GQA1 uses the same query and duplicated packed KV, bypassing paired-head kernels.
         ggml_tensor * separate = ggml_flash_attn_ext(ctx, grouped->src[0], k_copy, v_copy, grouped->src[3],
                                                    1.0f/sqrtf(hsk), 0, 0);
         ggml_flash_attn_ext_set_prec(separate, GGML_PREC_F32);
@@ -63,7 +67,7 @@ struct test_flash_attn_ext_turbo4_gqa : public test_flash_attn_ext {
             initialize_mask(ggml_get_tensor(ctx, "m"));
         }
         // All-masked cases must write zeros rather than inherit the initial buffer contents.
-        for (const char * name : {"gqa2", "gqa1", "gqa_comparison"}) {
+        for (const char * name : {head_repeat == 4 ? "gqa4" : "gqa2", "gqa1", "gqa_comparison"}) {
             ggml_tensor * t = ggml_get_tensor(ctx, name);
             ggml_backend_tensor_memset(t, 0xff, 0, ggml_nbytes(t));
         }
@@ -71,7 +75,7 @@ struct test_flash_attn_ext_turbo4_gqa : public test_flash_attn_ext {
 
     double err(const float * a, const float * b, size_t n) override {
         const size_t head_size = size_t(hsv);
-        const size_t half_size = head_size*2*nh;
+        const size_t half_size = head_size*head_repeat*nh;
         if (n != 2*half_size) {
             return INFINITY;
         }
@@ -113,10 +117,12 @@ private:
 
     void initialize_queries(ggml_tensor * q) const {
         std::array<float, 128> row;
-        for (int64_t h = 0; h < 2*nh; ++h) {
+        for (int64_t h = 0; h < head_repeat*nh; ++h) {
             for (int d = 0; d < 128; ++d) {
                 if (opposed_queries) {
-                    row[d] = (h % 2 == 0 ? 1.5f : -1.5f)*(d % 2 == 0 ? 1.0f : -1.0f);
+                    // The second GQA4 pair has distinct scores and less concentrated weights.
+                    const float magnitude = head_repeat == 4 && h % 4 >= 2 ? 0.125f : 1.5f;
+                    row[d] = (h % 2 == 0 ? magnitude : -magnitude)*(d % 2 == 0 ? 1.0f : -1.0f);
                 } else {
                     row[d] = float((d*5 + h*13) % 29 - 14)/16.0f;
                 }
@@ -142,8 +148,8 @@ private:
                 const size_t written = ggml_quantize_chunk(cache->type, row.data(), packed.data(), 0, 1, 128, nullptr);
                 GGML_ASSERT(written == packed.size());
                 ggml_backend_tensor_set(cache, packed.data(), t*cache->nb[1] + h*cache->nb[2], packed.size());
-                for (int pair = 0; pair < 2; ++pair) {
-                    ggml_backend_tensor_set(copy, packed.data(), t*copy->nb[1] + (2*h + pair)*copy->nb[2], packed.size());
+                for (int repeat = 0; repeat < head_repeat; ++repeat) {
+                    ggml_backend_tensor_set(copy, packed.data(), t*copy->nb[1] + (head_repeat*h + repeat)*copy->nb[2], packed.size());
                 }
             }
         }
