@@ -88,6 +88,30 @@ llama_kv_cache::llama_kv_cache(
     v_cells_impl(other ? other->v_cells_impl : std::make_shared<llama_kv_cells_vec>()),
     v_cells(*v_cells_impl) {
 
+    if (type_k == GGML_TYPE_TURBO4_0) {
+        throw std::runtime_error("Turbo4 is supported only for the V cache");
+    }
+    if (type_v == GGML_TYPE_TURBO4_0) {
+        if (model.split_mode() == LLAMA_SPLIT_MODE_TENSOR) {
+            throw std::runtime_error("Turbo4 V cache does not support tensor split mode");
+        }
+        if (type_k != GGML_TYPE_Q8_0) {
+            throw std::runtime_error("Turbo4 V cache requires Q8_0 K cache");
+        }
+        if (v_trans) {
+            throw std::runtime_error("Turbo4 V cache requires flash attention");
+        }
+        if (hparams.is_mla()) {
+            throw std::runtime_error("Turbo4 V cache requires separate V storage");
+        }
+        for (uint32_t il = 0; il < hparams.n_layer_all; ++il) {
+            if (hparams.has_kv(il) &&
+                    (hparams.n_embd_head_v(il) == 0 || hparams.n_embd_head_v(il) % 128 != 0)) {
+                throw std::runtime_error("Turbo4 V cache requires V head dimensions divisible by 128");
+            }
+        }
+    }
+
     // shared cells view the source cache's K/V tensors, so the cell count
     // follows the source allocation: a fitted target can be smaller than the
     // draft default and oversized views would overflow the source tensors
@@ -215,6 +239,12 @@ llama_kv_cache::llama_kv_cache(
 
         if (offload) {
             auto * dev = model.dev_layer(il);
+            if (type_v == GGML_TYPE_TURBO4_0) {
+                const char * backend = ggml_backend_reg_name(ggml_backend_dev_backend_reg(dev));
+                if (strcmp(backend, "CPU") != 0 && strcmp(backend, "MTL") != 0) {
+                    throw std::runtime_error("Turbo4 V cache requires CPU or Metal placement");
+                }
+            }
             buft = ggml_backend_dev_buffer_type(dev);
 
             dev_name = ggml_backend_dev_name(dev);
@@ -365,6 +395,7 @@ llama_kv_cache::llama_kv_cache(
         const bool attn_rot_v =
             !attn_rot_disable &&
             n_embd_head_v_all > 0 &&
+            type_v != GGML_TYPE_TURBO4_0 &&
             ggml_is_quantized(type_v) &&
             hparams.n_embd_head_v() % 64 == 0;
 
@@ -2668,7 +2699,13 @@ ggml_tensor * llama_kv_cache::cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggm
             v = ggml_reshape_2d(ctx, v, n_embd_gqa, kv_size*n_stream);
         }
 
-        return ggml_set_rows(ctx, v, v_cur, v_idxs);
+        ggml_tensor * result = ggml_set_rows(ctx, v, v_cur, v_idxs);
+        if (v->type == GGML_TYPE_TURBO4_0) {
+            GGML_ASSERT(n_embd_head % 128 == 0);
+            const int32_t wht_group = 128;
+            memcpy(result->op_params, &wht_group, sizeof(wht_group));
+        }
+        return result;
     }
 
     if (ggml_row_size(v_cur->type, n_embd_gqa) == v_cur->nb[2]) {

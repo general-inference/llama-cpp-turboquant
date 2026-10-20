@@ -112,6 +112,9 @@ int ggml_metal_pipeline_max_theads_per_threadgroup(struct ggml_metal_pipeline_wi
 //   X(suffix, name): name is both the kernels/<name>.metal basename and the
 //   ggml_metallib_<name>_{start,end} embed-symbol stem.
 #define GGML_METAL_LIBS \
+    X(TURBO4,          turbo4)         \
+    X(FA_TURBO4,       fa_turbo4)      \
+    X(FA_VEC_TURBO4,   fa_vec_turbo4)  \
     X(CACHEGEN,        cachegen)       \
     X(FA_AUX,          fa_aux)         \
     X(FA_F16,          fa_f16)         \
@@ -1703,6 +1706,39 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
     const bool has_simdgroup_reduction = dev->props.has_simdgroup_reduction;
     const bool has_bfloat              = dev->props.has_bfloat;
 
+    bool has_turbo4 = op->type == GGML_TYPE_TURBO4_0;
+    for (int i = 0; i < GGML_MAX_SRC; ++i) {
+        has_turbo4 = has_turbo4 || (op->src[i] != NULL && op->src[i]->type == GGML_TYPE_TURBO4_0);
+    }
+    if (has_turbo4) {
+        // Turbo4 kernels only operate on the V cache.
+        switch (op->op) {
+            case GGML_OP_NONE:
+            case GGML_OP_RESHAPE:
+            case GGML_OP_VIEW:
+            case GGML_OP_PERMUTE:
+            case GGML_OP_TRANSPOSE:
+                return true;
+            case GGML_OP_SET_ROWS:
+                if (op->type != GGML_TYPE_TURBO4_0) {
+                    return false;
+                }
+                break;
+            case GGML_OP_FLASH_ATTN_EXT:
+                if (op->type != GGML_TYPE_F32 || op->src[2]->type != GGML_TYPE_TURBO4_0) {
+                    return false;
+                }
+                break;
+            default:
+                return false;
+        }
+        for (int i = 0; i < GGML_MAX_SRC; ++i) {
+            if (i != 2 && op->src[i] != NULL && op->src[i]->type == GGML_TYPE_TURBO4_0) {
+                return false;
+            }
+        }
+    }
+
     if (!has_bfloat) {
         if (op->type == GGML_TYPE_BF16) {
             return false;
@@ -1716,6 +1752,12 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
     }
 
     switch (op->op) {
+        case GGML_OP_TURBO_WHT:
+            return op->src[0]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32 &&
+                op->src[1] == NULL && op->op_params[1] == 128 &&
+                (op->op_params[0] == 0 || op->op_params[0] == 1) &&
+                op->src[0]->ne[0] % 128 == 0 &&
+                ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op);
         case GGML_OP_SCALE:
         case GGML_OP_FILL:
         case GGML_OP_CLAMP:
@@ -1887,6 +1929,18 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
         case GGML_OP_ROLL:
             return ggml_is_contiguous(op->src[0]);
         case GGML_OP_FLASH_ATTN_EXT:
+            if (op->src[2]->type == GGML_TYPE_TURBO4_0) {
+                return has_simdgroup_mm &&
+                    op->src[0]->type == GGML_TYPE_F32 &&
+                    op->src[1]->type == GGML_TYPE_Q8_0 &&
+                    op->src[0]->ne[0] == 128 && op->src[1]->ne[0] == 128 && op->src[2]->ne[0] == 128 &&
+                    op->src[1]->ne[1] == op->src[2]->ne[1] &&
+                    op->src[1]->ne[2] == op->src[2]->ne[2] &&
+                    op->src[1]->ne[3] == op->src[2]->ne[3] &&
+                    ggml_is_contiguous_rows(op->src[0]) &&
+                    ggml_is_contiguous_rows(op->src[1]) &&
+                    ggml_is_contiguous_rows(op->src[2]);
+            }
             // for new head sizes, add checks here
             if (op->src[0]->ne[0] != 32 &&
                 op->src[0]->ne[0] != 40 &&
@@ -2111,6 +2165,13 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                    op->src[0]->type != GGML_TYPE_TQ1_0;
         case GGML_OP_SET_ROWS:
             {
+                if (op->type == GGML_TYPE_TURBO4_0) {
+                    return op->src[0]->type == GGML_TYPE_F32 &&
+                        (op->src[1]->type == GGML_TYPE_I32 || op->src[1]->type == GGML_TYPE_I64) &&
+                        op->src[0]->ne[0] % 128 == 0 &&
+                        op->src[0]->nb[0] == sizeof(float) &&
+                        (op->op_params[0] == 0 || op->op_params[0] == 128);
+                }
                 if (op->src[0]->type == GGML_TYPE_F16) {
                     return op->type == GGML_TYPE_F16;
                 }

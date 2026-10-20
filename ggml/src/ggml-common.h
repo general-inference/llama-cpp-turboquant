@@ -184,6 +184,14 @@ typedef struct {
 } block_q1_0;
 static_assert(sizeof(block_q1_0) == sizeof(ggml_half) + QK1_0 / 8, "wrong q1_0 block size/padding");
 
+
+#define QK_TURBO4 128
+typedef struct {
+    ggml_half norm;
+    uint8_t qs[QK_TURBO4 / 2];
+} block_turbo4_0;
+static_assert(sizeof(block_turbo4_0) == 66, "wrong turbo4_0 block size");
+
 #define QK2_0 64
 typedef struct {
     ggml_half d;              // delta (scale)

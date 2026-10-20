@@ -55,6 +55,7 @@ function(ggml_add_cpu_backend_variant_impl tag_name)
         ggml-cpu/vec.h
         ggml-cpu/vec.cpp
         ggml-cpu/ops.h
+        ggml-cpu/turbo4.cpp
         ggml-cpu/ops.cpp
         )
 

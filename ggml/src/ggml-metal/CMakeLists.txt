@@ -29,6 +29,7 @@ set(METALLIB_COMMON "${CMAKE_CURRENT_SOURCE_DIR}/../ggml-common.h")
 set(METALLIB_KERNELS_COMMON     "${CMAKE_CURRENT_SOURCE_DIR}/kernels/common.h")
 set(METALLIB_KERNELS_DEQUANTIZE "${CMAKE_CURRENT_SOURCE_DIR}/kernels/dequantize.h")
 set(METALLIB_KERNELS_QUANTIZE   "${CMAKE_CURRENT_SOURCE_DIR}/kernels/quantize.h")
+set(METALLIB_KERNELS_TURBO4     "${CMAKE_CURRENT_SOURCE_DIR}/kernels/turbo4.h")
 set(METALLIB_KERNELS_FA_COMMON     "${CMAKE_CURRENT_SOURCE_DIR}/kernels/fa_common.metal")
 set(METALLIB_KERNELS_FA_VEC_COMMON "${CMAKE_CURRENT_SOURCE_DIR}/kernels/fa_vec_common.metal")
 set(METALLIB_KERNELS_FA_SHARED
@@ -37,6 +38,9 @@ set(METALLIB_KERNELS_FA_SHARED
 )
 
 set(METALLIB_KERNEL_SOURCES
+    kernels/turbo4.metal
+    kernels/fa_turbo4.metal
+    kernels/fa_vec_turbo4.metal
     kernels/cachegen.metal
     kernels/fa_aux.metal
     kernels/fa_f16.metal
@@ -105,6 +109,10 @@ if (GGML_METAL_EMBED_LIBRARY)
         if(_has_quantize)
             list(APPEND HEADERS_FOR_SRC ${METALLIB_KERNELS_QUANTIZE})
         endif()
+        file(STRINGS ${SRC} _has_turbo4 REGEX "#include \"turbo4\\.h\"")
+        if(_has_turbo4)
+            list(APPEND HEADERS_FOR_SRC ${METALLIB_KERNELS_TURBO4})
+        endif()
         file(STRINGS ${SRC} _has_fa_common REGEX "#include \"fa_common\\.metal\"")
         file(STRINGS ${SRC} _has_fa_vec_common REGEX "#include \"fa_vec_common\\.metal\"")
         if(_has_fa_common)
@@ -119,7 +127,7 @@ if (GGML_METAL_EMBED_LIBRARY)
             # Step 1: concatenate shared headers + this kernel source
             COMMAND cat ${HEADERS_FOR_SRC} ${SRC} > "${EMBED}.tmp1"
             # Step 2: remove internal #include and #pragma once
-            COMMAND sed -e "/\#include \"common.h\"/d" -e "/\#include \"dequantize.h\"/d" -e "/\#include \"quantize.h\"/d" -e "/\#include \"fa_common.metal\"/d" -e "/\#include \"fa_vec_common.metal\"/d" -e "/\#pragma once/d" < "${EMBED}.tmp1" > "${EMBED}.tmp2"
+            COMMAND sed -e "/\#include \"common.h\"/d" -e "/\#include \"dequantize.h\"/d" -e "/\#include \"quantize.h\"/d" -e "/\#include \"turbo4.h\"/d" -e "/\#include \"fa_common.metal\"/d" -e "/\#include \"fa_vec_common.metal\"/d" -e "/\#pragma once/d" < "${EMBED}.tmp1" > "${EMBED}.tmp2"
             # Step 3: inline ggml-common.h (replacing __embed_ggml-common.h__ sentinel)
             COMMAND sed -e "/__embed_ggml-common.h__/r ${METALLIB_COMMON}" -e "/__embed_ggml-common.h__/d" < "${EMBED}.tmp2" > "${EMBED}.tmp3"
             # Step 4: inline ggml-metal-impl.h
@@ -153,6 +161,7 @@ else()
     configure_file(kernels/common.h     ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/kernels/common.h     COPYONLY)
     configure_file(kernels/dequantize.h ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/kernels/dequantize.h COPYONLY)
     configure_file(kernels/quantize.h   ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/kernels/quantize.h   COPYONLY)
+    configure_file(kernels/turbo4.h     ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/kernels/turbo4.h     COPYONLY)
     foreach(hdr ${METALLIB_KERNELS_FA_SHARED})
         get_filename_component(hdr_name ${hdr} NAME)
         configure_file(${hdr} ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/kernels/${hdr_name} COPYONLY)
@@ -214,7 +223,7 @@ else()
         add_custom_command(
             OUTPUT ${AIR}
             COMMAND xcrun -sdk ${METAL_SDK} metal ${XC_FLAGS} -I ${CMAKE_RUNTIME_OUTPUT_DIRECTORY} -c ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/${src} -o ${AIR}
-            DEPENDS ${src} ${METALLIB_KERNELS_FA_SHARED} kernels/common.h kernels/dequantize.h kernels/quantize.h ${METALLIB_COMMON} ggml-metal-impl.h
+            DEPENDS ${src} ${METALLIB_KERNELS_FA_SHARED} kernels/common.h kernels/dequantize.h kernels/quantize.h kernels/turbo4.h ${METALLIB_COMMON} ggml-metal-impl.h
             COMMENT "Compiling ${src}"
             VERBATIM
         )

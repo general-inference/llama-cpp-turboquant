@@ -392,6 +392,10 @@ static int ggml_metal_op_encode_impl(ggml_metal_op_t ctx, int idx) {
             {
                 n_fuse = ggml_metal_op_set_rows(ctx, idx);
             } break;
+        case GGML_OP_TURBO_WHT:
+            {
+                n_fuse = ggml_metal_op_turbo_wht(ctx, idx);
+            } break;
         case GGML_OP_DIAG:
             {
                 n_fuse = ggml_metal_op_diag(ctx, idx);
@@ -1268,7 +1272,14 @@ int ggml_metal_op_set_rows(ggml_metal_op_t ctx, int idx) {
     GGML_TENSOR_LOCALS( int32_t, ne,  op,         ne);
     GGML_TENSOR_LOCALS(uint64_t, nb,  op,         nb);
 
-    auto pipeline = ggml_metal_library_get_pipeline_set_rows(lib, op);
+    const auto * props_dev = ggml_metal_device_get_props(ctx->dev);
+    const bool cooperative = props_dev->has_simdgroup_reduction &&
+        op->src[0]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_TURBO4_0 &&
+        (op->src[1]->type == GGML_TYPE_I32 || op->src[1]->type == GGML_TYPE_I64) &&
+        ne00 == 1024 && ne01 == 1 && ne02 == 1 && ne03 == 1 &&
+        ne2 == 1 && ne3 == 1 && ggml_nelements(op->src[1]) == 1 &&
+        ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op->src[1]) && ggml_is_contiguous(op);
+    auto pipeline = ggml_metal_library_get_pipeline_set_rows(lib, op, cooperative);
 
     const int32_t nk0 = ne0/ggml_blck_size(op->type);
 
@@ -1312,8 +1323,40 @@ int ggml_metal_op_set_rows(ggml_metal_op_t ctx, int idx) {
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[1]), 2);
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         3);
 
-    ggml_metal_encoder_dispatch_threadgroups(enc, (ne01 + nrptg - 1)/nrptg, ne02, ne03, nth, nrptg, 1);
+    if (cooperative) {
+        GGML_ASSERT(ggml_metal_pipeline_max_theads_per_threadgroup(pipeline) >= 32);
+        ggml_metal_encoder_dispatch_threadgroups(enc, nk0, 1, 1, 32, 1, 1);
+    } else {
+        ggml_metal_encoder_dispatch_threadgroups(enc, (ne01 + nrptg - 1)/nrptg, ne02, ne03, nth, nrptg, 1);
+    }
 
+    return 1;
+}
+
+int ggml_metal_op_turbo_wht(ggml_metal_op_t ctx, int idx) {
+    ggml_tensor * op = ctx->node(idx);
+    const int direction = op->op_params[0];
+    const int group_size = op->op_params[1];
+    const int64_t n_elements = ggml_nelements(op->src[0]);
+    const int64_t n_groups = n_elements/128;
+    GGML_ASSERT(group_size == 128 && op->src[1] == nullptr);
+
+    const auto * props = ggml_metal_device_get_props(ctx->dev);
+    const bool simd_inverse = props->has_simdgroup_reduction &&
+        direction == 1 && n_groups > 0 && n_groups <= 64;
+    const char * name = simd_inverse ? "kernel_turbo_wht_inverse_simd" : "kernel_turbo_wht";
+    auto pipeline = ggml_metal_library_get_pipeline(ctx->lib, name);
+    if (!pipeline.pipeline) {
+        pipeline = ggml_metal_library_compile_pipeline(ctx->lib, name, name, nullptr);
+    }
+    const ggml_metal_kargs_turbo_wht args = {n_elements, direction};
+    ggml_metal_encoder_set_pipeline(ctx->enc, pipeline);
+    ggml_metal_encoder_set_bytes(ctx->enc, &args, sizeof(args), 0);
+    ggml_metal_encoder_set_buffer(ctx->enc, ggml_metal_get_buffer_id(op->src[0]), 1);
+    ggml_metal_encoder_set_buffer(ctx->enc, ggml_metal_get_buffer_id(op), 2);
+    const int threads = simd_inverse ? 32 : 256;
+    const int64_t groups = simd_inverse ? n_groups : (n_groups + threads - 1)/threads;
+    ggml_metal_encoder_dispatch_threadgroups(ctx->enc, groups, 1, 1, threads, 1, 1);
     return 1;
 }
 
@@ -3105,6 +3148,9 @@ bool ggml_metal_op_flash_attn_ext_use_vec(const ggml_tensor * op) {
 // dequantize the quantized KV cache to F16 before running the F16 flash attention kernels
 static bool ggml_metal_op_flash_attn_ext_use_kv_f16(const ggml_tensor * op) {
     assert(op->op == GGML_OP_FLASH_ATTN_EXT);
+    if (op->src[2]->type == GGML_TYPE_TURBO4_0) {
+        return false;
+    }
 
     // depending on compute/bandwidth ratio, dequant to f16 kv is not always beneficial
     // ref: https://github.com/ggml-org/llama.cpp/pull/27390#issuecomment-5355152767
@@ -3129,6 +3175,9 @@ static bool ggml_metal_op_flash_attn_ext_use_kv_f16(const ggml_tensor * op) {
 
 static bool ggml_metal_op_flash_attn_ext_use_tensor(const ggml_tensor * op, bool has_tensor) {
     assert(op->op == GGML_OP_FLASH_ATTN_EXT);
+    if (op->src[2]->type == GGML_TYPE_TURBO4_0) {
+        return false;
+    }
 
     if (!has_tensor || ggml_metal_op_flash_attn_ext_use_vec(op)) {
         return false;
@@ -3173,6 +3222,10 @@ static bool ggml_metal_op_flash_attn_ext_use_tensor(const ggml_tensor * op, bool
 // n_kv_max is only an upper bound on their number per mask row, used to size the index lists
 static int ggml_metal_op_flash_attn_ext_n_kv_max_sparse(const ggml_tensor * op) {
     assert(op->op == GGML_OP_FLASH_ATTN_EXT);
+    // The rotated cache uses the qualified dense kernels; hints do not change its route.
+    if (op->src[2]->type == GGML_TYPE_TURBO4_0) {
+        return 0;
+    }
 
     int32_t n_kv_max = 0;
     memcpy(&n_kv_max, ((const int32_t *) op->op_params) + 4, sizeof(n_kv_max));
@@ -3439,7 +3492,9 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
     GGML_ASSERT(ne00 % 4 == 0);
 
     GGML_ASSERT(op->src[0]->type == GGML_TYPE_F32);
-    GGML_ASSERT(op->src[1]->type == op->src[2]->type);
+    GGML_ASSERT(op->src[1]->type == op->src[2]->type ||
+            (op->src[2]->type == GGML_TYPE_TURBO4_0 &&
+             op->src[1]->type == GGML_TYPE_Q8_0));
 
     //GGML_ASSERT(ggml_are_same_shape (src1, src2));
     GGML_ASSERT(ne11 == ne21);
@@ -3867,10 +3922,18 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
                           (int) ne00, (int) ne20,   // dk, dv (ne00 == dk for FA)
                           ne11, ne01);
 
+        if (op->src[2]->type == GGML_TYPE_TURBO4_0) {
+            cfg = {1, 4};
+        }
         int nqptg = cfg.Q; // queries per threadgroup
 
         const int ncpsg = OP_FLASH_ATTN_EXT_VEC_NCPSG; // cache values per simdgroup !! sync with kernel template arguments !!
-        const int nhptg = 1;                           // heads per threadgroup
+        const bool paired_heads = !use_sparse && nqptg == 1 && ncpsg == 32 &&
+            op->src[1]->type == GGML_TYPE_Q8_0 && op->src[2]->type == GGML_TYPE_TURBO4_0 &&
+            ne00 == 128 && ne10 == 128 && ne20 == 128 && ne01 == 1 &&
+            ne03 == 1 && ne13 == 1 && ne23 == 1 && (ne02 == 2*ne12 || ne02 == 4*ne12) && ne12 == ne22 &&
+            !has_sinks && !has_bias && !has_scap && (!has_mask || (ne32 == 1 && ne33 == 1));
+        const int nhptg = paired_heads ? 2 : 1;
 
         GGML_ASSERT(nqptg <= 32);
         GGML_ASSERT(nqptg == 1 || nqptg == 2 || nqptg == 4);  // only instantiated Q values
@@ -3966,6 +4029,9 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
         const int64_t dv_pad = GGML_PAD(ne20, 128);
 
         auto fa_vec_smem = [&](int64_t nsg, int32_t nqptg) -> size_t {
+            if (paired_heads) {
+                return 2*(512*nsg + 256)*sizeof(ggml_fp16_t);
+            }
             const size_t smem_half = (size_t) (dk_pad + 4*ncpsg + 2*dv_pad)*nqptg*nsg;
             return GGML_PAD(smem_half*sizeof(ggml_fp16_t) + (use_sparse ? (size_t) nsg*ncpsg*sizeof(int) : 0), 16);
         };
@@ -4048,7 +4114,7 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
             /*.n_kv_max_padded =*/ n_kv_max_padded,
         };
 
-        auto pipeline = ggml_metal_library_get_pipeline_flash_attn_ext_vec(lib, op, has_mask, has_sinks, has_bias, has_scap, has_kvpad, use_sparse, nqptg, cfg.NE, nsg, nwg, use_kv_f16, ns10, ns20);
+        auto pipeline = ggml_metal_library_get_pipeline_flash_attn_ext_vec(lib, op, has_mask, has_sinks, has_bias, has_scap, has_kvpad, use_sparse, nqptg, cfg.NE, nsg, nwg, use_kv_f16, ns10, ns20, paired_heads);
 
         GGML_ASSERT(nsg*32 <= ggml_metal_pipeline_max_theads_per_threadgroup(pipeline));
 

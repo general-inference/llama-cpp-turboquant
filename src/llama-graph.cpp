@@ -3406,6 +3406,9 @@ ggml_tensor * llm_graph_context::build_attn_mha(
     const bool fold_kq_b_into_mask = cparams.flash_attn && kq_b != nullptr && kq_mask != nullptr &&
             arch == LLM_ARCH_INKLING;
     const bool use_flash_attn = cparams.flash_attn && (kq_b == nullptr || fold_kq_b_into_mask);
+    if (v->type == GGML_TYPE_TURBO4_0 && !use_flash_attn) {
+        throw std::runtime_error("Turbo4 V cache requires a flash-attention graph");
+    }
     if (use_flash_attn) {
         ggml_tensor * fa_mask = kq_mask;
         if (fold_kq_b_into_mask) {
@@ -3443,6 +3446,14 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         GGML_ASSERT(n_kv_max >= 0 && n_kv_max <= INT32_MAX);
         ggml_flash_attn_ext_set_n_kv_max(cur, static_cast<int32_t>(n_kv_max));
         ggml_prec_set_acc(cur, GGML_PREC_F32);
+
+        if (v->type == GGML_TYPE_TURBO4_0) {
+            GGML_ASSERT(cur->ne[0] % 128 == 0);
+            if (!ggml_is_contiguous(cur)) {
+                cur = ggml_cont(ctx0, cur);
+            }
+            cur = ggml_turbo_wht(ctx0, cur, 1, 128, nullptr);
+        }
 
         if (v_mla) {
 #if 0

@@ -212,6 +212,9 @@ typedef pthread_t ggml_thread_t;
 #include <TargetConditionals.h>
 #endif
 
+static void ggml_vec_dot_turbo4_f32(int n, float * GGML_RESTRICT s, size_t bs,
+        const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+
 static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
     [GGML_TYPE_F32] = {
         .from_float               = (ggml_from_float_t) ggml_cpu_fp32_to_fp32,
@@ -230,6 +233,12 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
         .vec_dot                  = ggml_vec_dot_q1_0_q8_0,
         .vec_dot_type             = GGML_TYPE_Q8_0,
         .nrows                    = 1,
+    },
+    [GGML_TYPE_TURBO4_0] = {
+        .from_float = (ggml_from_float_t) quantize_row_turbo4_0_ref,
+        .vec_dot = ggml_vec_dot_turbo4_f32,
+        .vec_dot_type = GGML_TYPE_F32,
+        .nrows = 1,
     },
     [GGML_TYPE_Q2_0] = {
         .from_float               = quantize_row_q2_0,
@@ -2165,6 +2174,10 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 // nop
             } break;
+        case GGML_OP_TURBO_WHT:
+            {
+                ggml_compute_forward_turbo_wht(params, tensor);
+            } break;
         case GGML_OP_COUNT:
             {
                 GGML_ABORT("fatal error");
@@ -2282,6 +2295,7 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
             {
                 n_tasks = 1;
             } break;
+        case GGML_OP_TURBO_WHT:
         case GGML_OP_COUNT_EQUAL:
         case GGML_OP_SOLVE_TRI:
         case GGML_OP_GATED_DELTA_NET:
@@ -3939,4 +3953,21 @@ void ggml_cpu_init(void) {
     }
 
     ggml_critical_section_end();
+}
+
+static void ggml_vec_dot_turbo4_f32(int n, float * GGML_RESTRICT s, size_t bs,
+        const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    GGML_ASSERT(nrc == 1 && n % QK_TURBO4 == 0);
+    GGML_UNUSED(bs); GGML_UNUSED(bx); GGML_UNUSED(by); GGML_UNUSED(nrc);
+    const block_turbo4_0 * x = (const block_turbo4_0 *) vx;
+    const float * y = (const float *) vy;
+    float sum = 0.0f;
+    for (int i = 0; i < n / QK_TURBO4; ++i) {
+        float decoded[QK_TURBO4];
+        dequantize_row_turbo4_0(x + i, decoded, QK_TURBO4);
+        for (int j = 0; j < QK_TURBO4; ++j) {
+            sum += decoded[j] * y[i * QK_TURBO4 + j];
+        }
+    }
+    *s = sum;
 }

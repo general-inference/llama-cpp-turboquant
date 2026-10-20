@@ -5505,6 +5505,16 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
             {
                 VALIDATE_ROW_DATA_D_F16_IMPL(block_q1_0, data, nb);
             } break;
+        case GGML_TYPE_TURBO4_0:
+            {
+                const block_turbo4_0 * blocks = (const block_turbo4_0 *) data;
+                for (size_t i = 0; i < nb; ++i) {
+                    const float norm = GGML_FP16_TO_FP32(blocks[i].norm);
+                    if (!validate_float(norm, i) || norm < 0.0f) {
+                        return false;
+                    }
+                }
+            } break;
         case GGML_TYPE_Q2_0:
             {
                 VALIDATE_ROW_DATA_D_F16_IMPL(block_q2_0, data, nb);
