@@ -170,3 +170,12 @@ private:
         ggml_backend_tensor_set(m, packed.data(), 0, packed.size()*sizeof(ggml_fp16_t));
     }
 };
+
+// Separately selectable prerequisite for occupied-32K decode experiments.
+struct test_flash_attn_ext_turbo4_long : public test_flash_attn_ext_turbo4_gqa {
+    using test_flash_attn_ext_turbo4_gqa::test_flash_attn_ext_turbo4_gqa;
+
+    std::string vars() override {
+        return "q8_turbo4_long_" + test_flash_attn_ext_turbo4_gqa::vars();
+    }
+};

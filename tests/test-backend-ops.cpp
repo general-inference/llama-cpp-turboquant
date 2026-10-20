@@ -10689,6 +10689,19 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         }
     }
 
+    // Aligned and tail 32K decode, retaining the same-device duplicated-KV oracle.
+    for (int head_repeat : {2, 4}) {
+        for (int kv : {32767, 32768}) {
+            for (bool permuted : {false, true}) {
+                for (auto pattern : {test_flash_attn_ext_turbo4_gqa::mask_pattern::NONE,
+                                     test_flash_attn_ext_turbo4_gqa::mask_pattern::PARTIAL,
+                                     test_flash_attn_ext_turbo4_gqa::mask_pattern::ALL}) {
+                    test_cases.emplace_back(new test_flash_attn_ext_turbo4_long(kv, permuted, pattern, false, head_repeat));
+                }
+            }
+        }
+    }
+
     // mixed quant and Q1_0 test cases
     test_cases.emplace_back(new test_flash_attn_ext(64, 64, 4, {1, 1}, 128, 2, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q4_0));
     test_cases.emplace_back(new test_flash_attn_ext(64, 64, 4, {1, 1}, 128, 2, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q4_0, GGML_TYPE_F16));
