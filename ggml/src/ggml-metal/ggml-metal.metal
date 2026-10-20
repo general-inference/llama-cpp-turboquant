@@ -9236,7 +9236,7 @@ kernel void kernel_flash_attn_ext_vec(
 #undef NS20
 }
 
-kernel void kernel_flash_attn_ext_vec_pair_kq8_0_vturbo4_dk128_dv128(
+kernel void kernel_flash_attn_ext_vec_pair_vf32_kq8_0_vturbo4_dk128_dv128(
         constant ggml_metal_kargs_flash_attn_ext_vec & args,
         device const char * q,
         device const char * k,
@@ -9377,13 +9377,20 @@ kernel void kernel_flash_attn_ext_vec_pair_kq8_0_vturbo4_dk128_dv128(
             const bool active1 = true;
 #endif
             device const block_turbo4_0 * pv = (device const block_turbo4_0 *) (pv_base + (ic + cc)*args.nb21);
-            half4 mv;
-            dequantize_turbo4_0_t4(pv, tiisg, mv);
+            // Keep the packed codec unchanged; avoid the vec path's half LUT and half product rounding.
+            const float norm = float(pv->norm);
+            const uchar qb0 = pv->qs[2*tiisg];
+            const uchar qb1 = pv->qs[2*tiisg + 1];
+            const float4 mv = float4(
+                turbo_centroids_4bit[qb0 & 0xF],
+                turbo_centroids_4bit[qb0 >> 4],
+                turbo_centroids_4bit[qb1 & 0xF],
+                turbo_centroids_4bit[qb1 >> 4])*norm;
             if (active0) {
-                lo0 += float4(mv)*weight0;
+                lo0 += mv*weight0;
             }
             if (active1) {
-                lo1 += float4(mv)*weight1;
+                lo1 += mv*weight1;
             }
         }
         so0[tiisg] += lo0;

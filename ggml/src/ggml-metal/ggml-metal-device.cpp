@@ -1669,7 +1669,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_v
     // Asymmetric K/V: always encode both K and V types in the pipeline name.
     // Uses k/v prefix to avoid ambiguity with type names containing underscores.
     snprintf(base, 256, "kernel_%s_k%s_v%s_dk%d_dv%d",
-            paired_heads ? "flash_attn_ext_vec_pair" : "flash_attn_ext_vec",
+            paired_heads ? "flash_attn_ext_vec_pair_vf32" : "flash_attn_ext_vec",
             ggml_type_name(op->src[1]->type),
             ggml_type_name(op->src[2]->type),
             dk,
