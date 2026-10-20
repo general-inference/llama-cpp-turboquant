@@ -3558,7 +3558,7 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
         const bool paired_heads = nqptg == 1 && ncpsg == 32 &&
             op->src[1]->type == GGML_TYPE_Q8_0 && op->src[2]->type == GGML_TYPE_TURBO4_0 &&
             ne00 == 128 && ne10 == 128 && ne20 == 128 && ne01 == 1 &&
-            ne03 == 1 && ne13 == 1 && ne23 == 1 && ne02 == 2*ne12 && ne12 == ne22 &&
+            ne03 == 1 && ne13 == 1 && ne23 == 1 && (ne02 == 2*ne12 || ne02 == 4*ne12) && ne12 == ne22 &&
             !has_sinks && !has_bias && !has_scap && (!has_mask || (ne32 == 1 && ne33 == 1));
         const int nhptg = paired_heads ? 2 : 1; // heads per threadgroup
 
