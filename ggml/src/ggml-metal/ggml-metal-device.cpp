@@ -1994,8 +1994,9 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_v
         bool    use_kv_f16,
         int32_t ns10,
         int32_t ns20,
-        bool    paired_heads) {
+        int32_t nhptg) {
     assert(op->op == GGML_OP_FLASH_ATTN_EXT);
+    GGML_ASSERT(nhptg == 1 || nhptg == 2 || nhptg == 4);
 
     char base[256];
     char name[256];
@@ -2019,10 +2020,10 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_v
     if (op->src[2]->type == GGML_TYPE_TURBO4_0) {
         GGML_ASSERT(nqpsg == 1 && ne == 4);
         snprintf(base, sizeof(base), "kernel_flash_attn_ext_vec%s_k%s_vturbo4_dk%d_dv%d",
-                paired_heads ? "_pair" : "", type, dk, dv);
+                nhptg == 4 ? "_quartet" : nhptg == 2 ? "_pair" : "", type, dk, dv);
     }
-    // The paired pipeline requires this specialization on M1, including aligned extents.
-    has_kvpad = has_kvpad || paired_heads;
+    // Shared-head pipelines require this specialization on M1, including aligned extents.
+    has_kvpad = has_kvpad || nhptg > 1;
 
     snprintf(name, 256, "%s_mask=%d_sink=%d_bias=%d_scap=%d_kvpad=%d_sparse=%d_ns10=%d_ns20=%d_nsg=%d_nwg=%d",
             base,
@@ -2042,7 +2043,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_v
 
         ggml_metal_cv_set_bool(cv, has_mask,  FC_FLASH_ATTN_EXT_VEC + 0);
         ggml_metal_cv_set_bool(cv, has_kvpad, FC_FLASH_ATTN_EXT_VEC + 4);
-        if (!paired_heads) {
+        if (nhptg == 1) {
             ggml_metal_cv_set_bool(cv, has_sinks, FC_FLASH_ATTN_EXT_VEC + 1);
             ggml_metal_cv_set_bool(cv, has_bias,  FC_FLASH_ATTN_EXT_VEC + 2);
             ggml_metal_cv_set_bool(cv, has_scap,  FC_FLASH_ATTN_EXT_VEC + 3);
