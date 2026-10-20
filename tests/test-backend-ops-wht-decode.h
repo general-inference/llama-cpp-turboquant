@@ -17,7 +17,7 @@ struct test_turbo_wht_decode : public test_case {
         return "TURBO_WHT";
     }
 
-    double max_nmse_err() override { return 1e-5; }
+    double max_nmse_err() override { return mode == 1 ? 1e-10 : 1e-5; }
     bool run_whole_graph() override { return mode == 2; }
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
