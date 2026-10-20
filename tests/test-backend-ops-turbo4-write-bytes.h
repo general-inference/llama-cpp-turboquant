@@ -109,6 +109,16 @@ private:
         std::vector<uint8_t> a(ggml_nbytes(fast)), b(ggml_nbytes(fallback));
         ggml_backend_tensor_get(fast, a.data(), 0, a.size());
         ggml_backend_tensor_get(fallback, b.data(), 0, b.size());
+        if (pattern < 4) {
+            const auto input = input_values();
+            std::vector<uint8_t> cpu(row_bytes);
+            ggml_quantize_chunk(GGML_TYPE_TURBO4_0, input.data(), cpu.data(), 0, 1, width, nullptr);
+            if (memcmp(a.data() + row*row_bytes, cpu.data(), row_bytes) != 0) {
+                fprintf(stderr, "TQ_T4_WRITE_BYTES CPU scale or code mismatch row=%lld pattern=%d\n",
+                        (long long) row, pattern);
+                return false;
+            }
+        }
         for (int64_t r = 0; r < rows; ++r) {
             for (size_t j = 0; j < row_bytes; ++j) {
                 const uint8_t av = a[r*row_bytes + j], bv = b[r*row_bytes + j];

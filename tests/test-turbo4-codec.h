@@ -17,13 +17,13 @@ static constexpr float turbo_cpu_s2[128] = {
     1,-1,1,1,1,-1,-1,1,-1,1,-1,1,1,-1,-1,1,-1,1,-1,1,1,-1,1,-1,1,-1,-1,-1,-1,-1,1,-1
 };
 
-
+#include "test-turbo4-scale.h"
 
 static int test_turbo4_codec() {
     const auto type = GGML_TYPE_TURBO4_0;
     const auto * traits = ggml_get_type_traits(type);
     const auto * cpu = ggml_get_type_traits_cpu(type);
-    int failures = 0;
+    int failures = test_turbo4_scale();
     for (int blocks : {1, 3, 17}) {
         std::vector<float> input(blocks*128), decoded(input.size()), rhs(input.size());
         for (size_t i = 0; i < input.size(); ++i) {

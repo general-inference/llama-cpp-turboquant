@@ -105,13 +105,15 @@ void quantize_row_turbo4_0_ref(const float * GGML_RESTRICT x, block_turbo4_0 * G
             indices[i] = (uint8_t)nearest_centroid_4bit(rotated[i]);
         }
 
-        /* Norm correction */
+        /* Minimize reconstruction error for the selected codeword. */
         float recon_norm_sq = 0.0f;
+        float projection = 0.0f;
         for (int i = 0; i < d; i++) {
-            recon_norm_sq += CENTROIDS_4BIT[indices[i]] * CENTROIDS_4BIT[indices[i]];
+            const float c = CENTROIDS_4BIT[indices[i]];
+            recon_norm_sq += c * c;
+            projection += rotated[i] * c;
         }
-        float recon_norm = sqrtf(recon_norm_sq);
-        float corrected_norm = (recon_norm > 1e-10f) ? norm / recon_norm : norm;
+        float corrected_norm = (recon_norm_sq > 1e-20f) ? norm * (projection / recon_norm_sq) : 0.0f;
         y[block].norm = GGML_FP32_TO_FP16(corrected_norm);
 
         /* Pack */

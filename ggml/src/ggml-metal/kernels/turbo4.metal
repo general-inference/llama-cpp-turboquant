@@ -202,6 +202,7 @@ kernel void kernel_set_rows_turbo4(
         for (int j = 0; j < QK_TURBO4 / 2; j++) blk.qs[j] = 0;
 
         float recon_norm_sq = 0.0f;
+        float projection = 0.0f;
         for (int j = 0; j < 128; j++) {
             float val = x[j];
             uint8_t idx;
@@ -226,10 +227,10 @@ kernel void kernel_set_rows_turbo4(
 
             float c = turbo_centroids_4bit[idx];
             recon_norm_sq += c * c;
+            projection += val * c;
         }
 
-        float recon_norm = sqrt(recon_norm_sq);
-        blk.norm = half((recon_norm > 1e-10f) ? grp_norm / recon_norm : grp_norm);
+        blk.norm = half((recon_norm_sq > 1e-20f) ? grp_norm * (projection / recon_norm_sq) : 0.0f);
     }
 }
 
@@ -245,6 +246,7 @@ kernel void kernel_set_rows_turbo4_simd(
     device block_turbo4_0 & blk = ((device block_turbo4_0 *) ((device char *) dst + row*args.nb1))[tgpig.x];
     device const float * src = (device const float *) src0 + 128*tgpig.x;
     threadgroup uint8_t indices[128];
+    threadgroup float rotated[128];
 
     float grp_norm = 0.0f;
     float inv_norm = 0.0f;
@@ -272,6 +274,7 @@ kernel void kernel_set_rows_turbo4_simd(
     uint8_t code[4];
     for (int j = 0; j < 4; ++j) {
         const float val = x[j]*turbo_wht_signs2[4*lane + j];
+        rotated[4*lane + j] = val;
         uint8_t idx;
         if      (val < turbo_mid_4bit[ 0]) idx = 0;
         else if (val < turbo_mid_4bit[ 1]) idx = 1;
@@ -297,12 +300,13 @@ kernel void kernel_set_rows_turbo4_simd(
     simdgroup_barrier(mem_flags::mem_threadgroup);
     if (lane == 0) {
         float recon_norm_sq = 0.0f;
+        float projection = 0.0f;
         for (int j = 0; j < 128; ++j) {
             float c = turbo_centroids_4bit[indices[j]];
             recon_norm_sq += c * c;
+            projection += rotated[j] * c;
         }
-        float recon_norm = sqrt(recon_norm_sq);
-        blk.norm = half((recon_norm > 1e-10f) ? grp_norm / recon_norm : grp_norm);
+        blk.norm = half((recon_norm_sq > 1e-20f) ? grp_norm * (projection / recon_norm_sq) : 0.0f);
     }
 }
 
