@@ -8513,6 +8513,11 @@ struct test_flash_attn_ext : public test_case {
     }
 };
 
+#include "test-backend-ops-skippy-turbo4.h"
+#include "test-backend-ops-turbo4-gqa.h"
+#include "test-backend-ops-wht-decode.h"
+#include "test-backend-ops-turbo4-write-bytes.h"
+
 // large Q values, so the online softmax has to rescale the partial results
 struct test_flash_attn_ext_large_logits : public test_flash_attn_ext {
     static constexpr int q_range = 20;
@@ -9635,6 +9640,22 @@ static const ggml_type other_types[] = {
 // Test cases for evaluation: should try to cover edge cases while using small input sizes to keep the runtime low
 static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     std::vector<std::unique_ptr<test_case>> test_cases;
+    add_skippy_turbo4_attention_tests(test_cases);
+    add_turbo_wht_decode_tests(test_cases);
+    add_turbo4_write_byte_tests(test_cases);
+    for (int gqa : {2, 4}) {
+        for (int64_t kv : {113, 512, 5632}) {
+            for (bool permuted : {false, true}) {
+                for (auto pattern : {test_flash_attn_ext_turbo4_gqa::mask_pattern::NONE,
+                                     test_flash_attn_ext_turbo4_gqa::mask_pattern::PARTIAL,
+                                     test_flash_attn_ext_turbo4_gqa::mask_pattern::ALL}) {
+                    for (bool opposed : {false, true}) {
+                        test_cases.emplace_back(new test_flash_attn_ext_turbo4_gqa(kv, permuted, pattern, opposed, gqa));
+                    }
+                }
+            }
+        }
+    }
     std::default_random_engine rng(0);
 
     // unary ops

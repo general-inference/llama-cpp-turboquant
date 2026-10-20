@@ -175,6 +175,11 @@ static int test_vec_dot_q(bool verbose) {
         const auto * qfns = ggml_get_type_traits(type);
         const auto * qfns_cpu = ggml_get_type_traits_cpu(type);
 
+        // Turbo4 dequantization stays rotated; its separate test checks inverse rotation.
+        if (type == GGML_TYPE_TURBO4_0) {
+            continue;
+        }
+
         // deprecated - skip
         if (qfns->blck_size == 0) {
             continue;
@@ -279,6 +284,8 @@ static int test_quantize_imatrix_degenerate(bool verbose) {
     return num_failed;
 }
 
+#include "test-turbo4-codec.h"
+
 int main(int argc, char * argv[]) {
     bool verbose = false;
 
@@ -301,6 +308,7 @@ int main(int argc, char * argv[]) {
     num_failed += test_vec_dot_f32(verbose);
     num_failed += test_vec_dot_q(verbose);
     num_failed += test_quantize_imatrix_degenerate(verbose);
+    num_failed += test_turbo4_codec();
 
     if (num_failed || verbose) {
         printf("%d tests failed\n", num_failed);

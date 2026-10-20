@@ -11,6 +11,8 @@
 #include <string>
 #include <vector>
 
+#include "test-skippy-turbo4-cache.h"
+
 // An unrecognized derived memory may add state that the base adapter omits.
 class unknown_kv_memory : public llama_kv_cache {
 public:
@@ -78,6 +80,11 @@ static bool graph_cache_capabilities_cover_complete_state() {
 }
 
 int main() {
+    if (!turbo4_cache_lifecycle()) {
+        fprintf(stderr, "Turbo4 cache lifecycle or graph capability contract failed\n");
+        return 1;
+    }
+    fprintf(stderr, "Turbo4 cache lifecycle and graph capabilities: OK (ABI 0.1.72, feature bit 41)\n");
     if (!graph_cache_capabilities_cover_complete_state()) {
         fprintf(stderr, "graph cache capabilities do not cover complete state\n");
         return 1;
