@@ -10659,20 +10659,22 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         }
     }
 
-    for (int kv : {113, 2048, 2049, 4096, 4097, 5120, 8192}) {
-        for (bool permuted : {false, true}) {
-            for (auto pattern : {test_flash_attn_ext_turbo4_gqa::mask_pattern::NONE,
-                                 test_flash_attn_ext_turbo4_gqa::mask_pattern::PARTIAL,
-                                 test_flash_attn_ext_turbo4_gqa::mask_pattern::ALL}) {
-                test_cases.emplace_back(new test_flash_attn_ext_turbo4_gqa(kv, permuted, pattern));
+    for (int head_repeat : {2, 4}) {
+        for (int kv : {113, 2048, 2049, 4096, 4097, 5120, 8192}) {
+            for (bool permuted : {false, true}) {
+                for (auto pattern : {test_flash_attn_ext_turbo4_gqa::mask_pattern::NONE,
+                                     test_flash_attn_ext_turbo4_gqa::mask_pattern::PARTIAL,
+                                     test_flash_attn_ext_turbo4_gqa::mask_pattern::ALL}) {
+                    test_cases.emplace_back(new test_flash_attn_ext_turbo4_gqa(kv, permuted, pattern, false, head_repeat));
+                }
             }
         }
-    }
-    for (int kv : {113, 5120}) {
-        for (bool permuted : {false, true}) {
-            for (auto pattern : {test_flash_attn_ext_turbo4_gqa::mask_pattern::NONE,
-                                 test_flash_attn_ext_turbo4_gqa::mask_pattern::PARTIAL}) {
-                test_cases.emplace_back(new test_flash_attn_ext_turbo4_gqa(kv, permuted, pattern, true));
+        for (int kv : {113, 5120}) {
+            for (bool permuted : {false, true}) {
+                for (auto pattern : {test_flash_attn_ext_turbo4_gqa::mask_pattern::NONE,
+                                     test_flash_attn_ext_turbo4_gqa::mask_pattern::PARTIAL}) {
+                    test_cases.emplace_back(new test_flash_attn_ext_turbo4_gqa(kv, permuted, pattern, true, head_repeat));
+                }
             }
         }
     }
