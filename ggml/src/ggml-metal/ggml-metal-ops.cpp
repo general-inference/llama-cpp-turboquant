@@ -1249,7 +1249,15 @@ int ggml_metal_op_set_rows(ggml_metal_op_t ctx, int idx) {
     GGML_TENSOR_LOCALS( int32_t, ne,  op,         ne);
     GGML_TENSOR_LOCALS(uint64_t, nb,  op,         nb);
 
-    auto pipeline = ggml_metal_library_get_pipeline_set_rows(lib, op);
+    const auto * props_dev = ggml_metal_device_get_props(ctx->dev);
+    const bool cooperative = props_dev->has_simdgroup_reduction &&
+        op->src[0]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_TURBO4_0 &&
+        (op->src[1]->type == GGML_TYPE_I32 || op->src[1]->type == GGML_TYPE_I64) &&
+        ne00 == 1024 && ne01 == 1 && ne02 == 1 && ne03 == 1 &&
+        ne2 == 1 && ne3 == 1 && ggml_nelements(op->src[1]) == 1 &&
+        ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op->src[1]) && ggml_is_contiguous(op);
+
+    auto pipeline = ggml_metal_library_get_pipeline_set_rows(lib, op, cooperative);
 
     const int32_t nk0 = ne0/ggml_blck_size(op->type);
 
@@ -1293,7 +1301,12 @@ int ggml_metal_op_set_rows(ggml_metal_op_t ctx, int idx) {
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[1]), 2);
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         3);
 
-    ggml_metal_encoder_dispatch_threadgroups(enc, (ne01 + nrptg - 1)/nrptg, ne02, ne03, nth, nrptg, 1);
+    if (cooperative) {
+        GGML_ASSERT(ggml_metal_pipeline_max_theads_per_threadgroup(pipeline) >= 32);
+        ggml_metal_encoder_dispatch_threadgroups(enc, nk0, 1, 1, 32, 1, 1);
+    } else {
+        ggml_metal_encoder_dispatch_threadgroups(enc, (ne01 + nrptg - 1)/nrptg, ne02, ne03, nth, nrptg, 1);
+    }
 
     return 1;
 }

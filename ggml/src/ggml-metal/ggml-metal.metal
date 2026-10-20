@@ -12461,6 +12461,84 @@ kernel void kernel_set_rows_turbo4(
     }
 }
 
+template<typename TI>
+kernel void kernel_set_rows_turbo4_simd(
+        constant ggml_metal_kargs_set_rows & args,
+        device const  void * src0,
+        device const  void * src1,
+        device       float * dst,
+        uint3                tgpig[[threadgroup_position_in_grid]],
+        ushort               lane[[thread_index_in_simdgroup]]) {
+    const TI row = ((device const TI *) src1)[0];
+    device block_turbo4_0 & blk = ((device block_turbo4_0 *) ((device char *) dst + row*args.nb1))[tgpig.x];
+    device const float * src = (device const float *) src0 + 128*tgpig.x;
+    threadgroup uint8_t indices[128];
+
+    // Keep the serial norm order used by the fallback.
+    float grp_norm = 0.0f;
+    float inv_norm = 0.0f;
+    if (lane == 0) {
+        float norm_sq = 0.0f;
+        for (int j = 0; j < QK_TURBO4; j++) norm_sq += src[j] * src[j];
+        grp_norm = sqrt(norm_sq);
+        inv_norm = grp_norm > 1e-10f ? 1.0f / grp_norm : 0.0f;
+    }
+    inv_norm = simd_shuffle(inv_norm, 0);
+
+    float4 x;
+    for (int j = 0; j < 4; ++j) {
+        x[j] = src[4*lane + j] * inv_norm;
+        x[j] *= turbo_wht_signs1[4*lane + j];
+    }
+    x = float4(x.x + x.y, x.x - x.y, x.z + x.w, x.z - x.w);
+    x = float4(x.x + x.z, x.y + x.w, x.x - x.z, x.y - x.w);
+    for (ushort h = 1; h < 32; h *= 2) {
+        const float4 other = float4(simd_shuffle_xor(x.x, h), simd_shuffle_xor(x.y, h),
+                                   simd_shuffle_xor(x.z, h), simd_shuffle_xor(x.w, h));
+        x = (lane & h) == 0 ? x + other : other - x;
+    }
+    x *= 0.08838834764831845f;
+    uint8_t code[4];
+    for (int j = 0; j < 4; ++j) {
+        const float val = x[j]*turbo_wht_signs2[4*lane + j];
+        uint8_t idx;
+        if      (val < turbo_mid_4bit[ 0]) idx = 0;
+        else if (val < turbo_mid_4bit[ 1]) idx = 1;
+        else if (val < turbo_mid_4bit[ 2]) idx = 2;
+        else if (val < turbo_mid_4bit[ 3]) idx = 3;
+        else if (val < turbo_mid_4bit[ 4]) idx = 4;
+        else if (val < turbo_mid_4bit[ 5]) idx = 5;
+        else if (val < turbo_mid_4bit[ 6]) idx = 6;
+        else if (val < turbo_mid_4bit[ 7]) idx = 7;
+        else if (val < turbo_mid_4bit[ 8]) idx = 8;
+        else if (val < turbo_mid_4bit[ 9]) idx = 9;
+        else if (val < turbo_mid_4bit[10]) idx = 10;
+        else if (val < turbo_mid_4bit[11]) idx = 11;
+        else if (val < turbo_mid_4bit[12]) idx = 12;
+        else if (val < turbo_mid_4bit[13]) idx = 13;
+        else if (val < turbo_mid_4bit[14]) idx = 14;
+        else                               idx = 15;
+        code[j] = idx;
+        indices[4*lane + j] = idx;
+    }
+    blk.qs[2*lane]     = code[0] | (code[1] << 4);
+    blk.qs[2*lane + 1] = code[2] | (code[3] << 4);
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane == 0) {
+        float recon_norm_sq = 0.0f;
+        for (int j = 0; j < 128; ++j) {
+            float c = turbo_centroids_4bit[indices[j]];
+            recon_norm_sq += c * c;
+        }
+        float recon_norm = sqrt(recon_norm_sq);
+        blk.norm = half((recon_norm > 1e-10f) ? grp_norm / recon_norm : grp_norm);
+    }
+}
+
+typedef decltype(kernel_set_rows_turbo4_simd<int64_t>) set_rows_turbo4_simd_t;
+template [[host_name("kernel_set_rows_f32_i64_turbo4_simd")]] kernel set_rows_turbo4_simd_t kernel_set_rows_turbo4_simd<int64_t>;
+template [[host_name("kernel_set_rows_f32_i32_turbo4_simd")]] kernel set_rows_turbo4_simd_t kernel_set_rows_turbo4_simd<int32_t>;
+
 template<typename TS, typename TI, typename TD>
 kernel void kernel_set_rows_f(
         constant ggml_metal_kargs_set_rows & args,
