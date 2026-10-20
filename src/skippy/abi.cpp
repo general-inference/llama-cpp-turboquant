@@ -48,7 +48,8 @@ uint64_t skippy_abi_features(void) {
            SKIPPY_FEATURE_NON_CHAT_WORKLOADS |
            SKIPPY_FEATURE_SYSTEM_ONE |
            SKIPPY_FEATURE_CACHEGEN_KV_PAGE |
-           SKIPPY_FEATURE_LAYA_DECISIONS;
+           SKIPPY_FEATURE_LAYA_DECISIONS |
+           SKIPPY_FEATURE_TURBO4_KV;
 }
 
 void skippy_error_free(struct skippy_error * error) {
