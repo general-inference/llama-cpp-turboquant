@@ -7677,6 +7677,7 @@ struct test_flash_attn_ext : public test_case {
 };
 
 #include "test-backend-ops-turbo4-gqa.h"
+#include "test-backend-ops-turbo4-v-f32.h"
 
 struct test_flash_attn_ext_q8_turbo4_ne : public test_flash_attn_ext {
     using test_flash_attn_ext::test_flash_attn_ext;
@@ -10684,6 +10685,17 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                 for (auto pattern : {test_flash_attn_ext_turbo4_gqa::mask_pattern::NONE,
                                      test_flash_attn_ext_turbo4_gqa::mask_pattern::PARTIAL}) {
                     test_cases.emplace_back(new test_flash_attn_ext_turbo4_gqa(kv, permuted, pattern, true, head_repeat));
+                }
+            }
+        }
+    }
+
+    // Float V arithmetic diagnostic: single live token, aligned/tail KV and both paired GQA ratios.
+    for (int head_repeat : {2, 4}) {
+        for (int kv : {32, 113, 2049, 5120}) {
+            for (bool permuted : {false, true}) {
+                for (bool live_last : {false, true}) {
+                    test_cases.emplace_back(new test_flash_attn_ext_turbo4_v_f32(head_repeat, kv, permuted, live_last));
                 }
             }
         }
