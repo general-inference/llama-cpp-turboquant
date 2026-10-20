@@ -8815,8 +8815,10 @@ kernel void kernel_flash_attn_ext_vec(
     }
 
     // zero out so
-    for (short i = 0; i < DV4/NL; ++i) {
-        so4[i*NL] = (o4_t) 0.0f;
+    if (tiisg < NL) {
+        for (short i = 0; i < DV4/NL; ++i) {
+            so4[i*NL] = (o4_t) 0.0f;
+        }
     }
 
     // zero out shared memory SH
