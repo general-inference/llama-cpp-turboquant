@@ -68,6 +68,9 @@ struct test_turbo_wht_decode : public test_case {
     }
 
     double err(const float * a, const float * b, size_t n) override {
+        if (n == sentinel_size && n != size_t(groups)*128) {
+            return memcmp(a, b, n*sizeof(float)) == 0 ? 0.0 : INFINITY;
+        }
         if (n != size_t(groups)*128) {
             return INFINITY;
         }
