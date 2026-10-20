@@ -58,7 +58,12 @@ struct test_skippy_turbo4_attention : public test_flash_attn_ext {
         if (type_K == GGML_TYPE_F16) {
             auto * q = ggml_get_tensor(ctx, "q");
             auto * buffer = q->view_src ? q->view_src->buffer : q->buffer;
-            check_f16_support(ggml_backend_buft_get_device(ggml_backend_buffer_get_type(buffer)));
+            auto * buft = ggml_backend_buffer_get_type(buffer);
+            auto * dev = ggml_backend_buft_get_device(buft);
+            if (!dev && buft == ggml_backend_cpu_buffer_type()) {
+                dev = ggml_backend_dev_by_name("CPU");
+            }
+            check_f16_support(dev);
         }
     }
 
