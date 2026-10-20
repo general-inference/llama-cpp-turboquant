@@ -1344,7 +1344,9 @@ int ggml_metal_op_turbo_wht(ggml_metal_op_t ctx, int idx) {
     const auto * props = ggml_metal_device_get_props(ctx->dev);
     const bool simd_inverse = props->has_simdgroup_reduction &&
         direction == 1 && n_groups > 0 && n_groups <= 64;
-    const char * name = simd_inverse ? "kernel_turbo_wht_inverse_simd" : "kernel_turbo_wht";
+    const char * name = direction == 1 ?
+        (simd_inverse ? "kernel_turbo_wht_inverse_simd_f32" : "kernel_turbo_wht_inverse_f32") :
+        "kernel_turbo_wht";
     auto pipeline = ggml_metal_library_get_pipeline(ctx->lib, name);
     if (!pipeline.pipeline) {
         pipeline = ggml_metal_library_compile_pipeline(ctx->lib, name, name, nullptr);
@@ -1355,6 +1357,7 @@ int ggml_metal_op_turbo_wht(ggml_metal_op_t ctx, int idx) {
     ggml_metal_encoder_set_buffer(ctx->enc, ggml_metal_get_buffer_id(op->src[0]), 1);
     ggml_metal_encoder_set_buffer(ctx->enc, ggml_metal_get_buffer_id(op), 2);
     const int threads = simd_inverse ? 32 : 256;
+    GGML_ASSERT(threads <= ggml_metal_pipeline_max_theads_per_threadgroup(pipeline));
     const int64_t groups = simd_inverse ? n_groups : (n_groups + threads - 1)/threads;
     ggml_metal_encoder_dispatch_threadgroups(ctx->enc, groups, 1, 1, threads, 1, 1);
     return 1;
