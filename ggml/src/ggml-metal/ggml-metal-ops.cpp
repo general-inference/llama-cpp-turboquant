@@ -1349,7 +1349,7 @@ int ggml_metal_op_turbo_wht(ggml_metal_op_t ctx, int idx) {
     if (!pipeline.pipeline) {
         pipeline = ggml_metal_library_compile_pipeline(ctx->lib, name, name, nullptr);
     }
-    const ggml_metal_kargs_turbo_wht args = {n_elements, direction};
+    ggml_metal_kargs_turbo_wht args = {n_elements, direction};
     ggml_metal_encoder_set_pipeline(ctx->enc, pipeline);
     ggml_metal_encoder_set_bytes(ctx->enc, &args, sizeof(args), 0);
     ggml_metal_encoder_set_buffer(ctx->enc, ggml_metal_get_buffer_id(op->src[0]), 1);

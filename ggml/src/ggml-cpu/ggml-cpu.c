@@ -6,6 +6,7 @@
 #include "traits.h"
 #include "ggml-cpu-impl.h"
 #include "ggml-impl.h"
+#include "ggml-quants.h"
 #include "quants.h"
 #include "ggml-threading.h"
 #include "unary-ops.h"
