@@ -3,9 +3,10 @@
 #include "turbo4.h"
 #include "fa_vec_common.metal"
 
-#define TURBO_SPARSE_V 1
-
-kernel void kernel_flash_attn_ext_vec_pair_kq8_0_vturbo4_dk128_dv128(
+template<typename kd4_t, short nl_k,
+         void (*deq_k_t4)(device const kd4_t *, short, thread half4 &),
+         bool sparse_v>
+kernel void kernel_flash_attn_ext_vec_pair_turbo4(
         constant ggml_metal_kargs_flash_attn_ext_vec & args,
         device const char * q,
         device const char * k,
@@ -82,11 +83,11 @@ kernel void kernel_flash_attn_ext_vec_pair_kq8_0_vturbo4_dk128_dv128(
         for (short cc = 0; cc < 8; ++cc) {
             float score0 = 0.0f;
             float score1 = 0.0f;
-            device const block_q8_0 * pk = (device const block_q8_0 *) (pk_base + (ic + 4*cc + ty)*args.nb11);
+            device const kd4_t * pk = (device const kd4_t *) (pk_base + (ic + 4*cc + ty)*args.nb11);
             FOR_UNROLL (short ii = 0; ii < 4; ++ii) {
                 const short i = ii*8 + tx;
                 half4 mk;
-                dequantize_q8_0_t4(pk + i/8, i%8, mk);
+                deq_k_t4(pk + i/nl_k, i%nl_k, mk);
                 score0 += dot(float4(mk), float4(sq0[i]));
                 score1 += dot(float4(mk), float4(sq1[i]));
             }
@@ -135,16 +136,11 @@ kernel void kernel_flash_attn_ext_vec_pair_kq8_0_vturbo4_dk128_dv128(
         FOR_UNROLL (short cc = 0; cc < 32; ++cc) {
             const float weight0 = ss0[cc];
             const float weight1 = ss1[cc];
-#if TURBO_SPARSE_V
-            const bool active0 = !(weight0 < 1e-6f);
-            const bool active1 = !(weight1 < 1e-6f);
+            const bool active0 = !sparse_v || !(weight0 < 1e-6f);
+            const bool active1 = !sparse_v || !(weight1 < 1e-6f);
             if (!active0 && !active1) {
                 continue;
             }
-#else
-            const bool active0 = true;
-            const bool active1 = true;
-#endif
             device const block_turbo4_0 * pv = (device const block_turbo4_0 *) (pv_base + (ic + cc)*args.nb21);
             half4 mv;
             dequantize_turbo4_0_t4(pv, tiisg, mv);
@@ -210,6 +206,10 @@ kernel void kernel_flash_attn_ext_vec_pair_kq8_0_vturbo4_dk128_dv128(
 #undef NWG
 #undef NSG
 }
+
+typedef decltype(kernel_flash_attn_ext_vec_pair_turbo4<block_q8_0, 8, dequantize_q8_0_t4, true>) flash_attn_turbo4_pair_t;
+template [[host_name("kernel_flash_attn_ext_vec_pair_kq8_0_vturbo4_dk128_dv128")]] kernel flash_attn_turbo4_pair_t kernel_flash_attn_ext_vec_pair_turbo4<block_q8_0, 8, dequantize_q8_0_t4, true>;
+template [[host_name("kernel_flash_attn_ext_vec_pair_kf16_vturbo4_dk128_dv128")]] kernel flash_attn_turbo4_pair_t kernel_flash_attn_ext_vec_pair_turbo4<half4, 1, dequantize_f16_t4, false>;
 
 #define FA_TYPES half4, half4, half4, float, float, float4, float4
 
