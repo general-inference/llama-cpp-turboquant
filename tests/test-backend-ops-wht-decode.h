@@ -100,4 +100,9 @@ static void add_turbo_wht_decode_tests(std::vector<std::unique_ptr<test_case>> &
             }
         }
     }
+    for (int64_t groups : {1024, 16384}) {
+        for (int pattern : {0, 1, 2, 3}) {
+            cases.emplace_back(new test_turbo_wht_decode(groups, 1, pattern));
+        }
+    }
 }
