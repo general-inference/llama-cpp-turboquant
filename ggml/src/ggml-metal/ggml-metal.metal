@@ -8693,6 +8693,10 @@ template [[host_name("kernel_flash_attn_ext_kturbo4_vq8_0_dk320_dv256")]] kernel
 template [[host_name("kernel_flash_attn_ext_kturbo4_vq8_0_dk512_dv512")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_turbo4_0, 8, dequantize_turbo4_0, block_q8_0, 2, dequantize_q8_0, 512, 512>;
 template [[host_name("kernel_flash_attn_ext_kturbo4_vq8_0_dk576_dv512")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, block_turbo4_0, 8, dequantize_turbo4_0, block_q8_0, 2, dequantize_q8_0, 576, 512>;
 
+// F16 keys with Q8 or Turbo4 values, 128-d heads.
+template [[host_name("kernel_flash_attn_ext_kf16_vq8_0_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, half4x4, 1, dequantize_f16, block_q8_0, 2, dequantize_q8_0, 128, 128>;
+template [[host_name("kernel_flash_attn_ext_kf16_vturbo4_dk128_dv128")]] kernel flash_attn_ext_t kernel_flash_attn_ext<FA_TYPES, half4x4, 1, dequantize_f16, block_turbo4_0, 8, dequantize_turbo4_0, 128, 128>;
+
 #undef FA_TYPES
 #undef FA_TYPES_BF
 #undef FA_TYPES_F32
@@ -9721,6 +9725,10 @@ template [[host_name("kernel_flash_attn_ext_vec_kturbo4_vq8_0_dk256_dv256")]] ke
 template [[host_name("kernel_flash_attn_ext_vec_kturbo4_vq8_0_dk320_dv256")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_turbo4_0, 32, dequantize_turbo4_0_t4, block_q8_0, 8, dequantize_q8_0_t4, 320, 256, 2>;
 template [[host_name("kernel_flash_attn_ext_vec_kturbo4_vq8_0_dk512_dv512")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_turbo4_0, 32, dequantize_turbo4_0_t4, block_q8_0, 8, dequantize_q8_0_t4, 512, 512, 1>;
 template [[host_name("kernel_flash_attn_ext_vec_kturbo4_vq8_0_dk576_dv512")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, block_turbo4_0, 32, dequantize_turbo4_0_t4, block_q8_0, 8, dequantize_q8_0_t4, 576, 512, 2>;
+
+// F16 keys with Q8 or Turbo4 values, 128-d heads.
+template [[host_name("kernel_flash_attn_ext_vec_kf16_vq8_0_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, half4, 1, dequantize_f16_t4, block_q8_0, 8, dequantize_q8_0_t4, 128, 128, 1>;
+template [[host_name("kernel_flash_attn_ext_vec_kf16_vturbo4_dk128_dv128")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES, half4, 1, dequantize_f16_t4, block_turbo4_0, 32, dequantize_turbo4_0_t4, 128, 128, 1>;
 
 #undef FA_TYPES
 #undef FA_TYPES_F32

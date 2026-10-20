@@ -1353,9 +1353,12 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                                          op->src[2]->type == GGML_TYPE_TURBO4_0);
                 const bool k_is_q8 = (op->src[1]->type == GGML_TYPE_Q8_0);
                 const bool v_is_q8 = (op->src[2]->type == GGML_TYPE_Q8_0);
+                const bool f16_mixed = op->src[1]->type == GGML_TYPE_F16 &&
+                    (v_is_q8 || op->src[2]->type == GGML_TYPE_TURBO4_0) &&
+                    op->src[1]->ne[0] == 128 && op->src[2]->ne[0] == 128;
                 const bool supported = (k_is_turbo && v_is_turbo) ||
                                        (k_is_q8 && v_is_turbo) ||
-                                       (k_is_turbo && v_is_q8);
+                                       (k_is_turbo && v_is_q8) || f16_mixed;
                 if (!supported) {
                     return false;
                 }
