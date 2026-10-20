@@ -9328,23 +9328,16 @@ kernel void kernel_flash_attn_ext_vec_gqa2_kq8_0_vturbo4_dk128_dv128(
         S1 = S1*ms1 + simd_sum(vs1);
         ss0[tiisg] = vs0;
         ss1[tiisg] = vs1;
-        if (ty == 0) {
-            FOR_UNROLL (short ii = 0; ii < 4; ++ii) {
-                so0[tiisg + ii*8] *= ms0;
-                so1[tiisg + ii*8] *= ms1;
-            }
-        }
+        so0[tiisg] *= ms0;
+        so1[tiisg] *= ms1;
         simdgroup_barrier(mem_flags::mem_threadgroup);
 
-        float4 lo0[4];
-        float4 lo1[4];
-        FOR_UNROLL (short ii = 0; ii < 4; ++ii) {
-            lo0[ii] = float4(0.0f);
-            lo1[ii] = float4(0.0f);
-        }
-        FOR_UNROLL (short cc = 0; cc < 8; ++cc) {
-            const float weight0 = ss0[4*cc + ty];
-            const float weight1 = ss1[4*cc + ty];
+        // Each lane owns four output dimensions and visits all 32 cache rows.
+        float4 lo0 = float4(0.0f);
+        float4 lo1 = float4(0.0f);
+        FOR_UNROLL (short cc = 0; cc < 32; ++cc) {
+            const float weight0 = ss0[cc];
+            const float weight1 = ss1[cc];
 #if TURBO_SPARSE_V
             const bool active0 = !(weight0 < 1e-6f);
             const bool active1 = !(weight1 < 1e-6f);
@@ -9355,41 +9348,18 @@ kernel void kernel_flash_attn_ext_vec_gqa2_kq8_0_vturbo4_dk128_dv128(
             const bool active0 = true;
             const bool active1 = true;
 #endif
-            device const block_turbo4_0 * pv = (device const block_turbo4_0 *) (pv_base + (ic + 4*cc + ty)*args.nb21);
-            FOR_UNROLL (short ii = 0; ii < 4; ++ii) {
-                const short i = ii*8 + tx;
-                half4 mv;
-                dequantize_turbo4_0_t4(pv, i, mv);
-                if (active0) {
-                    lo0[ii] += float4(mv)*weight0;
-                }
-                if (active1) {
-                    lo1[ii] += float4(mv)*weight1;
-                }
+            device const block_turbo4_0 * pv = (device const block_turbo4_0 *) (pv_base + (ic + cc)*args.nb21);
+            half4 mv;
+            dequantize_turbo4_0_t4(pv, tiisg, mv);
+            if (active0) {
+                lo0 += float4(mv)*weight0;
+            }
+            if (active1) {
+                lo1 += float4(mv)*weight1;
             }
         }
-        FOR_UNROLL (short ii = 0; ii < 4; ++ii) {
-            lo0[ii][0] += simd_shuffle_down(lo0[ii][0], 16);
-            lo0[ii][1] += simd_shuffle_down(lo0[ii][1], 16);
-            lo0[ii][2] += simd_shuffle_down(lo0[ii][2], 16);
-            lo0[ii][3] += simd_shuffle_down(lo0[ii][3], 16);
-            lo1[ii][0] += simd_shuffle_down(lo1[ii][0], 16);
-            lo1[ii][1] += simd_shuffle_down(lo1[ii][1], 16);
-            lo1[ii][2] += simd_shuffle_down(lo1[ii][2], 16);
-            lo1[ii][3] += simd_shuffle_down(lo1[ii][3], 16);
-            lo0[ii][0] += simd_shuffle_down(lo0[ii][0], 8);
-            lo0[ii][1] += simd_shuffle_down(lo0[ii][1], 8);
-            lo0[ii][2] += simd_shuffle_down(lo0[ii][2], 8);
-            lo0[ii][3] += simd_shuffle_down(lo0[ii][3], 8);
-            lo1[ii][0] += simd_shuffle_down(lo1[ii][0], 8);
-            lo1[ii][1] += simd_shuffle_down(lo1[ii][1], 8);
-            lo1[ii][2] += simd_shuffle_down(lo1[ii][2], 8);
-            lo1[ii][3] += simd_shuffle_down(lo1[ii][3], 8);
-            if (ty == 0) {
-                so0[tiisg + ii*8] += lo0[ii];
-                so1[tiisg + ii*8] += lo1[ii];
-            }
-        }
+        so0[tiisg] += lo0;
+        so1[tiisg] += lo1;
     }
 
     if (tiisg == 0) {
