@@ -4,6 +4,9 @@
 #include <cstring>
 #include <stdexcept>
 
+static_assert(SKIPPY_FEATURE_TURBO4_KV == (UINT64_C(1) << 41), "Q8_0/Turbo4 capability bit changed");
+static_assert(SKIPPY_FEATURE_TURBO4_F16_KV == (UINT64_C(1) << 42), "F16/Turbo4 capability bit changed");
+
 class turbo4_state_writer final : public llama_io_write_i {
 public:
     std::vector<uint8_t> data;
@@ -76,8 +79,9 @@ static bool turbo4_graph_capabilities() {
     return skippy_graph_cache_capabilities(result) == 0;
 }
 
-static bool turbo4_cache_lifecycle() {
-    if (SKIPPY_ABI_VERSION_PATCH != 72 || !(skippy_abi_features() & SKIPPY_FEATURE_TURBO4_KV) ||
+static bool turbo4_cache_lifecycle(ggml_type key_type) {
+    if (SKIPPY_ABI_VERSION_PATCH != 73 || !(skippy_abi_features() & SKIPPY_FEATURE_TURBO4_KV) ||
+            !(skippy_abi_features() & SKIPPY_FEATURE_TURBO4_F16_KV) ||
             !turbo4_graph_capabilities()) {
         return false;
     }
@@ -94,8 +98,8 @@ static bool turbo4_cache_lifecycle() {
                 0, LLAMA_SWA_TYPE_NONE, nullptr, llama_kv_cache::layer_filter_cb{},
                 llama_kv_cache::layer_reuse_cb{}, llama_kv_cache::layer_share_cb{});
     };
-    auto cache = make_cache(hp, GGML_TYPE_Q8_0, GGML_TYPE_TURBO4_0, false);
-    auto restore = make_cache(hp, GGML_TYPE_Q8_0, GGML_TYPE_TURBO4_0, false);
+    auto cache = make_cache(hp, key_type, GGML_TYPE_TURBO4_0, false);
+    auto restore = make_cache(hp, key_type, GGML_TYPE_TURBO4_0, false);
     const uint32_t expected = SKIPPY_MEMORY_CACHE_RESIDENT | SKIPPY_MEMORY_CACHE_KV_RECURRENT |
         SKIPPY_MEMORY_CACHE_FULL_STATE;
     if (skippy_memory_cache_capabilities(cache.get()) != expected) { return false; }
@@ -122,9 +126,11 @@ static bool turbo4_cache_lifecycle() {
     skippy_kv_page_desc desc = {};
     size_t bytes = 0;
     std::string error;
+    const size_t key_row_bytes = key_type == GGML_TYPE_F16 ? 512 : 272;
     if (!cache->stage_export_kv_page(0, 0, 1, 0, 2, &desc, nullptr, 0, &bytes, error) ||
-            desc.k_type != GGML_TYPE_Q8_0 || desc.v_type != GGML_TYPE_TURBO4_0 ||
-            desc.k_row_bytes != 272 || desc.v_row_bytes != 132 || desc.flags != 0 || bytes != 808) {
+            desc.k_type != key_type || desc.v_type != GGML_TYPE_TURBO4_0 ||
+            desc.k_row_bytes != key_row_bytes || desc.v_row_bytes != 132 || desc.flags != 0 ||
+            bytes != 2*(key_row_bytes + 132)) {
         return false;
     }
     std::vector<uint8_t> page(bytes), roundtrip(bytes);
@@ -137,14 +143,16 @@ static bool turbo4_cache_lifecycle() {
         size_t size = 0;
         return restore->stage_export_kv_page(0, 0, 1, 0, 2, &actual, roundtrip.data(), roundtrip.size(), &size, error) &&
             size == page.size() && roundtrip == page && actual.k_type == desc.k_type &&
+            actual.k_row_bytes == desc.k_row_bytes &&
             actual.v_type == desc.v_type && actual.v_row_bytes == desc.v_row_bytes;
     };
     if (!same_page()) { return false; }
-    for (int mutation = 0; mutation < 3; ++mutation) {
+    for (int mutation = 0; mutation < 4; ++mutation) {
         auto invalid = desc;
         if (mutation == 0) { invalid.v_type = GGML_TYPE_Q8_0; }
         if (mutation == 1) { ++invalid.v_row_bytes; }
         if (mutation == 2) { ++invalid.layer_count; }
+        if (mutation == 3) { invalid.k_type = key_type == GGML_TYPE_F16 ? GGML_TYPE_Q8_0 : GGML_TYPE_F16; }
         if (restore->stage_import_kv_page(0, invalid, page.data(), bytes, error) || !same_page()) { return false; }
     }
     restore->seq_cp(0, 1, 0, 2);
@@ -165,10 +173,10 @@ static bool turbo4_cache_lifecycle() {
     }
     for (int invalid = 0; invalid < 5; ++invalid) {
         auto bad_hp = hp;
-        auto k = GGML_TYPE_Q8_0;
+        auto k = key_type;
         bool trans = false;
         if (invalid == 0) { k = GGML_TYPE_TURBO4_0; }
-        if (invalid == 1) { k = GGML_TYPE_F16; }
+        if (invalid == 1) { k = GGML_TYPE_F32; }
         if (invalid == 2) { trans = true; }
         if (invalid == 3) { bad_hp.n_embd_head_v_full = 64; }
         if (invalid == 4) { bad_hp.n_embd_head_k_mla_impl = bad_hp.n_embd_head_v_mla_impl = 128; }
@@ -181,7 +189,7 @@ static bool turbo4_cache_lifecycle() {
     split_params.split_mode = LLAMA_SPLIT_MODE_TENSOR;
     std::unique_ptr<llama_model> split_model(llama_model_create(LLM_ARCH_LLAMA, split_params));
     try {
-        llama_kv_cache invalid(*split_model, hp, GGML_TYPE_Q8_0, GGML_TYPE_TURBO4_0,
+        llama_kv_cache invalid(*split_model, hp, key_type, GGML_TYPE_TURBO4_0,
                 false, false, true, 4, 2, 1, 0, LLAMA_SWA_TYPE_NONE, nullptr, {}, {}, {});
         return false;
     } catch (const std::runtime_error &) {}

@@ -3494,7 +3494,7 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
     GGML_ASSERT(op->src[0]->type == GGML_TYPE_F32);
     GGML_ASSERT(op->src[1]->type == op->src[2]->type ||
             (op->src[2]->type == GGML_TYPE_TURBO4_0 &&
-             op->src[1]->type == GGML_TYPE_Q8_0));
+             (op->src[1]->type == GGML_TYPE_Q8_0 || op->src[1]->type == GGML_TYPE_F16)));
 
     //GGML_ASSERT(ggml_are_same_shape (src1, src2));
     GGML_ASSERT(ne11 == ne21);
@@ -3838,7 +3838,8 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
             ggml_metal_op_concurrency_reset(ctx);
         }
 
-        const int is_q = !use_kv_f16 && ggml_is_quantized(op->src[1]->type) ? 1 : 0;
+        const int is_q = !use_kv_f16 &&
+            (ggml_is_quantized(op->src[1]->type) || ggml_is_quantized(op->src[2]->type)) ? 1 : 0;
 
         // shared memory layout (halfs unless noted):
         //   queries/attn/result: Q*(DK + 2*PAD2(DV,64) + 4*C)
@@ -3924,6 +3925,9 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
 
         if (op->src[2]->type == GGML_TYPE_TURBO4_0) {
             cfg = {1, 4};
+            if (op->src[1]->type == GGML_TYPE_F16) {
+                cfg.NE = 1;
+            }
         }
         int nqptg = cfg.Q; // queries per threadgroup
 

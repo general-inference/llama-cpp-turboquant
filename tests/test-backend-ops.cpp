@@ -8513,8 +8513,8 @@ struct test_flash_attn_ext : public test_case {
     }
 };
 
-#include "test-backend-ops-skippy-turbo4.h"
 #include "test-backend-ops-turbo4-gqa.h"
+#include "test-backend-ops-skippy-turbo4.h"
 #include "test-backend-ops-wht-decode.h"
 #include "test-backend-ops-turbo4-write-bytes.h"
 
@@ -9656,6 +9656,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             }
         }
     }
+    add_skippy_f16_turbo4_attention_tests(test_cases);
     std::default_random_engine rng(0);
 
     // unary ops

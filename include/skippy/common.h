@@ -46,7 +46,7 @@ extern "C" {
 
 #define SKIPPY_ABI_VERSION_MAJOR 0
 #define SKIPPY_ABI_VERSION_MINOR 1
-#define SKIPPY_ABI_VERSION_PATCH 72
+#define SKIPPY_ABI_VERSION_PATCH 73
 
 #if defined(_MSC_VER)
 #define SKIPPY_DEPRECATED(message) __declspec(deprecated(message))
@@ -112,6 +112,8 @@ enum skippy_feature {
 #define SKIPPY_FEATURE_LAYA_DECISIONS         (UINT64_C(1) << 40)
 /** @brief Runtime Q8_0 K / Turbo4 V cache (ggml type 43); requires supported graph geometry and CPU or Metal placement. */
 #define SKIPPY_FEATURE_TURBO4_KV              (UINT64_C(1) << 41)
+/** @brief Runtime F16 K / Turbo4 V cache; requires supported graph geometry and CPU or Metal placement. */
+#define SKIPPY_FEATURE_TURBO4_F16_KV          (UINT64_C(1) << 42)
 
 enum skippy_status {
     SKIPPY_STATUS_OK                      = 0,

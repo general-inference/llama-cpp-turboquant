@@ -438,7 +438,8 @@ static bool ggml_backend_cpu_device_supports_op(ggml_backend_dev_t dev, const st
         return (op->op == GGML_OP_SET_ROWS && src0->type == GGML_TYPE_F32 &&
                 op->type == GGML_TYPE_TURBO4_0) ||
             (op->op == GGML_OP_FLASH_ATTN_EXT && src0->type == GGML_TYPE_F32 &&
-                src1->type == GGML_TYPE_Q8_0 && op->src[2]->type == GGML_TYPE_TURBO4_0);
+                (src1->type == GGML_TYPE_Q8_0 || src1->type == GGML_TYPE_F16) &&
+                op->src[2]->type == GGML_TYPE_TURBO4_0);
     }
 
     // check extra buffer types

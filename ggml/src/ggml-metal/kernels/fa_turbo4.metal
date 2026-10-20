@@ -13,3 +13,4 @@
 
 typedef decltype(kernel_flash_attn_ext<FA_TYPES, block_q8_0, 2, dequantize_q8_0, block_turbo4_0, 8, dequantize_turbo4_0, 128, 128>) flash_attn_turbo4_t;
 template [[host_name("kernel_flash_attn_ext_kq8_0_vturbo4_dk128_dv128")]] kernel flash_attn_turbo4_t kernel_flash_attn_ext<FA_TYPES, block_q8_0, 2, dequantize_q8_0, block_turbo4_0, 8, dequantize_turbo4_0, 128, 128>;
+template [[host_name("kernel_flash_attn_ext_kf16_vturbo4_dk128_dv128")]] kernel flash_attn_turbo4_t kernel_flash_attn_ext<FA_TYPES, half4x4, 1, dequantize_f16, block_turbo4_0, 8, dequantize_turbo4_0, 128, 128>;

@@ -1932,7 +1932,7 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
             if (op->src[2]->type == GGML_TYPE_TURBO4_0) {
                 return has_simdgroup_mm &&
                     op->src[0]->type == GGML_TYPE_F32 &&
-                    op->src[1]->type == GGML_TYPE_Q8_0 &&
+                    (op->src[1]->type == GGML_TYPE_Q8_0 || op->src[1]->type == GGML_TYPE_F16) &&
                     op->src[0]->ne[0] == 128 && op->src[1]->ne[0] == 128 && op->src[2]->ne[0] == 128 &&
                     op->src[1]->ne[1] == op->src[2]->ne[1] &&
                     op->src[1]->ne[2] == op->src[2]->ne[2] &&

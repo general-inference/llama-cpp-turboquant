@@ -80,11 +80,11 @@ static bool graph_cache_capabilities_cover_complete_state() {
 }
 
 int main() {
-    if (!turbo4_cache_lifecycle()) {
+    if (!turbo4_cache_lifecycle(GGML_TYPE_Q8_0) || !turbo4_cache_lifecycle(GGML_TYPE_F16)) {
         fprintf(stderr, "Turbo4 cache lifecycle or graph capability contract failed\n");
         return 1;
     }
-    fprintf(stderr, "Turbo4 cache lifecycle and graph capabilities: OK (ABI 0.1.72, feature bit 41)\n");
+    fprintf(stderr, "Turbo4 cache lifecycle and graph capabilities: OK (ABI 0.1.73, feature bits 41/42, Q8_0/F16 K)\n");
     if (!graph_cache_capabilities_cover_complete_state()) {
         fprintf(stderr, "graph cache capabilities do not cover complete state\n");
         return 1;

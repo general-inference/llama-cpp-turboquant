@@ -95,8 +95,8 @@ llama_kv_cache::llama_kv_cache(
         if (model.split_mode() == LLAMA_SPLIT_MODE_TENSOR) {
             throw std::runtime_error("Turbo4 V cache does not support tensor split mode");
         }
-        if (type_k != GGML_TYPE_Q8_0) {
-            throw std::runtime_error("Turbo4 V cache requires Q8_0 K cache");
+        if (type_k != GGML_TYPE_Q8_0 && type_k != GGML_TYPE_F16) {
+            throw std::runtime_error("Turbo4 V cache requires Q8_0 or F16 K cache");
         }
         if (v_trans) {
             throw std::runtime_error("Turbo4 V cache requires flash attention");
