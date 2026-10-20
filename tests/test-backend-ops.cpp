@@ -2775,6 +2775,7 @@ struct test_set_rows_turbo4 : public test_case {
 };
 
 #include "test-backend-ops-turbo4-write-decode.h"
+#include "test-backend-ops-turbo4-write-bytes.h"
 
 // Test SET_ROWS with TQ4_1S destination (weight quantization), then dequantize and compare.
 // Validates: f32 -> WHT forward -> 16-centroid quantize -> nibble pack -> SET_ROWS
@@ -9030,6 +9031,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_set_rows_turbo3(GGML_TYPE_I32, 512, 1024, 256));
 
     add_turbo4_write_decode_tests(test_cases);
+    add_turbo4_write_byte_tests(test_cases);
 
     // SET_ROWS with turbo4 destination: quantize then dequant round-trip
     for (ggml_type idx_type : {GGML_TYPE_I32, GGML_TYPE_I64}) {
