@@ -81,13 +81,6 @@ constant float turbo_mid_4bit[15] = {
      0.127026f,  0.162947f,  0.212203f
 };
 
-constant half turbo_centroids_4bit_h[16] = {
-    -0.241529h, -0.182877h, -0.143016h, -0.111036h,
-    -0.083292h, -0.058050h, -0.034299h, -0.011349h,
-     0.011349h,  0.034299h,  0.058050h,  0.083292h,
-     0.111036h,  0.143016h,  0.182877h,  0.241529h
-};
-
 template <typename type4x4>
 void dequantize_turbo4_0(device const block_turbo4_0 * xb, short il, thread type4x4 & reg) {
     const float norm = float(xb->norm);
@@ -112,9 +105,9 @@ void dequantize_turbo4_0_t4(device const block_turbo4_0 * xb, short il, thread t
     const uint8_t qb1 = qs[1];
 
     reg = type4(float4(
-        float(turbo_centroids_4bit_h[(qb0     ) & 0xF]) * norm,
-        float(turbo_centroids_4bit_h[(qb0 >> 4) & 0xF]) * norm,
-        float(turbo_centroids_4bit_h[(qb1     ) & 0xF]) * norm,
-        float(turbo_centroids_4bit_h[(qb1 >> 4) & 0xF]) * norm
+        turbo_centroids_4bit[(qb0     ) & 0xF] * norm,
+        turbo_centroids_4bit[(qb0 >> 4) & 0xF] * norm,
+        turbo_centroids_4bit[(qb1     ) & 0xF] * norm,
+        turbo_centroids_4bit[(qb1 >> 4) & 0xF] * norm
     ));
 }
