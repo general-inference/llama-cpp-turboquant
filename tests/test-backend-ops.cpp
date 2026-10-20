@@ -2774,6 +2774,8 @@ struct test_set_rows_turbo4 : public test_case {
     }
 };
 
+#include "test-backend-ops-turbo4-write-decode.h"
+
 // Test SET_ROWS with TQ4_1S destination (weight quantization), then dequantize and compare.
 // Validates: f32 -> WHT forward -> 16-centroid quantize -> nibble pack -> SET_ROWS
 // followed by: GET_ROWS/CPY -> WHT inverse -> f32 dequant. Round-trip error is bounded.
@@ -9027,6 +9029,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_set_rows_turbo3(GGML_TYPE_I32, 256, 2048, 512));
     test_cases.emplace_back(new test_set_rows_turbo3(GGML_TYPE_I32, 512, 1024, 256));
 
+    add_turbo4_write_decode_tests(test_cases);
+
     // SET_ROWS with turbo4 destination: quantize then dequant round-trip
     for (ggml_type idx_type : {GGML_TYPE_I32, GGML_TYPE_I64}) {
         for (int64_t ne0 : {128, 256, 512}) {
@@ -10897,6 +10901,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
 // Test cases for performance evaluation: should be representative of real-world use cases
 static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
     std::vector<std::unique_ptr<test_case>> test_cases;
+
+    for (auto type_idx : {GGML_TYPE_I32, GGML_TYPE_I64}) {
+        test_cases.emplace_back(new test_set_rows_turbo4_decode(type_idx, 8192, 4096, 2));
+    }
 
     for (int64_t groups : {16, 32}) {
         test_cases.emplace_back(new test_turbo_wht_decode(groups, 1, 3));
