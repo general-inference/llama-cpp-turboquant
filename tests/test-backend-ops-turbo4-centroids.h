@@ -145,14 +145,14 @@ struct test_turbo4_centroids : public test_case {
     }
 
 private:
-    ggml_tensor * tensor(ggml_context * ctx, ggml_type type, int64_t rows, int64_t heads) const {
+    ggml_tensor * tensor(ggml_context * ctx, ggml_type type, int64_t rows, int64_t heads) {
         if (!permuted) {
             return ggml_new_tensor_4d(ctx, type, width, rows, heads, 1);
         }
         return ggml_permute(ctx, ggml_new_tensor_4d(ctx, type, width, heads, rows, 1), 0, 2, 1, 3);
     }
 
-    ggml_tensor * attention(ggml_context * ctx, ggml_tensor * keys, int64_t queries, const char * name) const {
+    ggml_tensor * attention(ggml_context * ctx, ggml_tensor * keys, int64_t queries, const char * name) {
         auto * q = tensor(ctx, GGML_TYPE_F32, queries, kv_heads*gqa);
         auto * mask = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, kv, queries, 1, 1);
         ggml_set_name(mask, queries == 1 ? "centroid_mask_1" : "centroid_mask_32");
