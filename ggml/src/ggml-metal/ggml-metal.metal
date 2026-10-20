@@ -3904,6 +3904,34 @@ kernel void kernel_turbo_wht(
     }
 }
 
+kernel void kernel_turbo_wht_inverse_simd(
+        constant ggml_metal_kargs_turbo_wht & args,
+        device const float * src [[buffer(1)]],
+        device       float * dst [[buffer(2)]],
+        uint group [[threadgroup_position_in_grid]],
+        ushort lane [[thread_index_in_simdgroup]]) {
+    if (group >= args.n_elements/128) {
+        return;
+    }
+    const uint64_t offset = uint64_t(group)*128 + uint64_t(lane)*4;
+    half4 x = half4(float4(src[offset], src[offset + 1], src[offset + 2], src[offset + 3])) * turbo_wht_signs2_h4[lane];
+    x = half4(x.x + x.y, x.x - x.y, x.z + x.w, x.z - x.w);
+    x = half4(x.x + x.z, x.y + x.w, x.x - x.z, x.y - x.w);
+    for (ushort step = 1; step < 32; step *= 2) {
+        const half4 partner = half4(
+            simd_shuffle_xor(float(x.x), step),
+            simd_shuffle_xor(float(x.y), step),
+            simd_shuffle_xor(float(x.z), step),
+            simd_shuffle_xor(float(x.w), step));
+        x = (lane & step) == 0 ? x + partner : partner - x;
+    }
+    const float4 out = float4(x * half4(0.08838834764831845h) * turbo_wht_signs1_h4[lane]);
+    dst[offset] = out.x;
+    dst[offset + 1] = out.y;
+    dst[offset + 2] = out.z;
+    dst[offset + 3] = out.w;
+}
+
 constant short FC_solve_tri_nsg [[function_constant(FC_SOLVE_TRI + 0)]];
 constant short FC_solve_tri_n   [[function_constant(FC_SOLVE_TRI + 1)]];
 constant short FC_solve_tri_k   [[function_constant(FC_SOLVE_TRI + 2)]];
