@@ -1,5 +1,6 @@
 #include "ops.h"
 #include "ggml-cpu.h"
+#include "ggml-cpu-impl.h"
 #include "ggml-impl.h"
 #include <cmath>
 
