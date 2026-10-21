@@ -1793,12 +1793,10 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_p
 
 ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_kv_f16(
         ggml_metal_library_t lib,
-        const ggml_tensor * op) {
-    assert(op->op == GGML_OP_FLASH_ATTN_EXT);
-
+        enum ggml_type type) {
     char base[256];
 
-    snprintf(base, 256, "kernel_flash_attn_ext_kv_%s_f16", ggml_type_name(op->src[1]->type));
+    snprintf(base, 256, "kernel_flash_attn_ext_kv_%s_f16", ggml_type_name(type));
 
     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, base);
     if (!res.pipeline) {
@@ -1918,7 +1916,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext(
             type,
             dk,
             dv);
-    if (op->src[2]->type == GGML_TYPE_TURBO4_0) {
+    if (!use_kv_f16 && op->src[2]->type == GGML_TYPE_TURBO4_0) {
         snprintf(base, sizeof(base), "kernel_flash_attn_ext_k%s_vturbo4_dk%d_dv%d", type, dk, dv);
     }
 
@@ -2017,7 +2015,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_v
             dk,
             dv,
             qne_suffix);
-    if (op->src[2]->type == GGML_TYPE_TURBO4_0) {
+    if (!use_kv_f16 && op->src[2]->type == GGML_TYPE_TURBO4_0) {
         GGML_ASSERT(nqpsg == 1 && ne == 4);
         snprintf(base, sizeof(base), "kernel_flash_attn_ext_vec%s_k%s_vturbo4_dk%d_dv%d",
                 nhptg == 4 ? "_quartet" : nhptg == 2 ? "_pair" : "", type, dk, dv);

@@ -1,5 +1,6 @@
 #include "common.h"
 #include "dequantize.h"
+#include "turbo4.h"
 
 // dequantize a quantized KV cache tensor to contiguous F16 before running the F16 flash attention kernels
 // - one thread per block; dispatched separately for K and V
@@ -47,6 +48,7 @@ template [[host_name("kernel_flash_attn_ext_kv_q4_1_f16")]] kernel kernel_flash_
 template [[host_name("kernel_flash_attn_ext_kv_q5_0_f16")]] kernel kernel_flash_attn_ext_kv_f16_t kernel_flash_attn_ext_kv_f16<block_q5_0, 32, dequantize_q5_0>;
 template [[host_name("kernel_flash_attn_ext_kv_q5_1_f16")]] kernel kernel_flash_attn_ext_kv_f16_t kernel_flash_attn_ext_kv_f16<block_q5_1, 32, dequantize_q5_1>;
 template [[host_name("kernel_flash_attn_ext_kv_q8_0_f16")]] kernel kernel_flash_attn_ext_kv_f16_t kernel_flash_attn_ext_kv_f16<block_q8_0, 32, dequantize_q8_0>;
+template [[host_name("kernel_flash_attn_ext_kv_turbo4_f16")]] kernel kernel_flash_attn_ext_kv_f16_t kernel_flash_attn_ext_kv_f16<block_turbo4_0, 128, dequantize_turbo4_0>;
 
 constant bool FC_flash_attn_ext_pad_has_mask [[function_constant(FC_FLASH_ATTN_EXT_PAD + 0)]];
 

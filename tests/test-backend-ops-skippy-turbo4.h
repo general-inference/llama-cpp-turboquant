@@ -149,6 +149,21 @@ static void add_skippy_turbo4_attention_tests(std::vector<std::unique_ptr<test_c
 
 static void add_skippy_f16_turbo4_attention_tests(std::vector<std::unique_ptr<test_case>> & cases) {
     add_skippy_turbo4_attention_tests(cases, GGML_TYPE_F16);
+    for (int64_t gqa : {2, 4}) {
+        for (auto permutation : {std::array<int32_t, 4>{0, 1, 2, 3}, std::array<int32_t, 4>{0, 2, 1, 3}}) {
+            for (int64_t kv : {113, 512, 5632}) {
+                for (int64_t queries : {31, 33}) {
+                    for (bool features : {false, true}) {
+                        cases.emplace_back(new test_skippy_turbo4_attention(128, 128, 8, {gqa, 1}, kv, queries,
+                            true, features, features ? 4.0f : 0.0f, features ? 10.0f : 0.0f,
+                            GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_TURBO4_0, permutation));
+                    }
+                }
+                cases.emplace_back(new test_skippy_turbo4_attention(128, 128, 8, {gqa, 1}, kv, 32,
+                    false, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_TURBO4_0, permutation));
+            }
+        }
+    }
     for (int gqa : {2, 4}) {
         for (int64_t kv : {113, 512, 5632}) {
             for (bool permuted : {false, true}) {
