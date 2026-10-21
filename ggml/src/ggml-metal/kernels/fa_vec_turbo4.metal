@@ -211,6 +211,20 @@ typedef decltype(kernel_flash_attn_ext_vec_pair_turbo4<block_q8_0, 8, dequantize
 template [[host_name("kernel_flash_attn_ext_vec_pair_kq8_0_vturbo4_dk128_dv128")]] kernel flash_attn_turbo4_pair_t kernel_flash_attn_ext_vec_pair_turbo4<block_q8_0, 8, dequantize_q8_0_t4, true>;
 template [[host_name("kernel_flash_attn_ext_vec_pair_kf16_vturbo4_dk128_dv128")]] kernel flash_attn_turbo4_pair_t kernel_flash_attn_ext_vec_pair_turbo4<half4, 1, dequantize_f16_t4, false>;
 
+static half4 dequantize_turbo4_quartet_shuffle(
+        device const block_turbo4_0 * xb, ushort lane, float centroid) {
+    const float norm = float(xb->norm);
+    const device uint8_t * qs = xb->qs + lane * 2;
+    const uint8_t qb0 = qs[0];
+    const uint8_t qb1 = qs[1];
+    return half4(float4(
+        simd_shuffle(centroid, ushort((qb0     ) & 0xF)) * norm,
+        simd_shuffle(centroid, ushort((qb0 >> 4) & 0xF)) * norm,
+        simd_shuffle(centroid, ushort((qb1     ) & 0xF)) * norm,
+        simd_shuffle(centroid, ushort((qb1 >> 4) & 0xF)) * norm
+    ));
+}
+
 kernel void kernel_flash_attn_ext_vec_quartet_kf16_vturbo4_dk128_dv128(
         constant ggml_metal_kargs_flash_attn_ext_vec & args,
         device const char * q,
@@ -234,6 +248,7 @@ kernel void kernel_flash_attn_ext_vec_quartet_kf16_vturbo4_dk128_dv128(
     const uint ikv2 = head0/4;
     const short tx = tiisg%8;
     const short ty = tiisg/8;
+    const float centroid = turbo_centroids_4bit[tiisg & 15];
 
     // Four independent head regions; global partial-output slots remain per head.
     const int head_stride = 128 + 320*NSG; // half elements
@@ -383,7 +398,7 @@ kernel void kernel_flash_attn_ext_vec_quartet_kf16_vturbo4_dk128_dv128(
         so3[tiisg] *= ms3;
         simdgroup_barrier(mem_flags::mem_threadgroup);
 
-        // Each lane decodes one float4 per row and reuses it for all four heads.
+        // All lanes reach the lookup; lanes 0..15 hold the complete centroid table.
         float4 lo0 = float4(0.0f);
         float4 lo1 = float4(0.0f);
         float4 lo2 = float4(0.0f);
@@ -394,8 +409,7 @@ kernel void kernel_flash_attn_ext_vec_quartet_kf16_vturbo4_dk128_dv128(
             const float weight2 = ss2[cc];
             const float weight3 = ss3[cc];
             device const block_turbo4_0 * pv = (device const block_turbo4_0 *) (pv_base + (ic + cc)*args.nb21);
-            half4 mv;
-            dequantize_turbo4_0_t4(pv, tiisg, mv);
+            const half4 mv = dequantize_turbo4_quartet_shuffle(pv, tiisg, centroid);
             lo0 += float4(mv)*weight0;
             lo1 += float4(mv)*weight1;
             lo2 += float4(mv)*weight2;
