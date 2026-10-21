@@ -3938,7 +3938,7 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
             ne00 == 128 && ne10 == 128 && ne20 == 128 && ne01 == 1 &&
             ne03 == 1 && ne13 == 1 && ne23 == 1 && (ne02 == 2*ne12 || ne02 == 4*ne12) && ne12 == ne22 &&
             !has_sinks && !has_bias && !has_scap && (!has_mask || (ne32 == 1 && ne33 == 1));
-        const int nhptg = paired_heads ? 2 : 1;
+        int nhptg = paired_heads ? 2 : 1;
 
         GGML_ASSERT(nqptg <= 32);
         GGML_ASSERT(nqptg == 1 || nqptg == 2 || nqptg == 4);  // only instantiated Q values
@@ -4035,7 +4035,7 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
 
         auto fa_vec_smem = [&](int64_t nsg, int32_t nqptg) -> size_t {
             if (paired_heads) {
-                return 2*(512*nsg + 256)*sizeof(ggml_fp16_t);
+                return nhptg*(512*nsg + 256)*sizeof(ggml_fp16_t);
             }
             const size_t smem_half = (size_t) (dk_pad + 4*ncpsg + 2*dv_pad)*nqptg*nsg;
             return GGML_PAD(smem_half*sizeof(ggml_fp16_t) + (use_sparse ? (size_t) nsg*ncpsg*sizeof(int) : 0), 16);
@@ -4072,6 +4072,11 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
             while (2*nwg*nsg*ncpsg < ne11 && nsg < 4) {
                 nsg *= 2;
             }
+        }
+
+        if (paired_heads && op->src[1]->type == GGML_TYPE_F16 && ne02 == 4*ne12 &&
+            4*(512*nsg + 256)*sizeof(ggml_fp16_t) <= props_dev->max_theadgroup_memory_size) {
+            nhptg = 4;
         }
 
         // fall back to baseline (Q=1) if the tuned config exceeds threadgroup memory
@@ -4119,7 +4124,11 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
             /*.n_kv_max_padded =*/ n_kv_max_padded,
         };
 
-        auto pipeline = ggml_metal_library_get_pipeline_flash_attn_ext_vec(lib, op, has_mask, has_sinks, has_bias, has_scap, has_kvpad, use_sparse, nqptg, cfg.NE, nsg, nwg, use_kv_f16, ns10, ns20, paired_heads);
+        auto pipeline = ggml_metal_library_get_pipeline_flash_attn_ext_vec(lib, op, has_mask, has_sinks, has_bias, has_scap, has_kvpad, use_sparse, nqptg, cfg.NE, nsg, nwg, use_kv_f16, ns10, ns20, nhptg);
+        if (nhptg == 4 && (!pipeline.pipeline || nsg*32 > ggml_metal_pipeline_max_theads_per_threadgroup(pipeline))) {
+            nhptg = 2;
+            pipeline = ggml_metal_library_get_pipeline_flash_attn_ext_vec(lib, op, has_mask, has_sinks, has_bias, has_scap, has_kvpad, use_sparse, nqptg, cfg.NE, nsg, nwg, use_kv_f16, ns10, ns20, nhptg);
+        }
 
         GGML_ASSERT(nsg*32 <= ggml_metal_pipeline_max_theads_per_threadgroup(pipeline));
 

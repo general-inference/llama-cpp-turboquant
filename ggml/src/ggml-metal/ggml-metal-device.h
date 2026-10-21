@@ -238,7 +238,7 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_att
         bool    use_kv_f16,
         int32_t ns10,
         int32_t ns20,
-        bool    paired_heads);
+        int32_t nhptg);
 
 struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_vec_reduce(
         ggml_metal_library_t lib,

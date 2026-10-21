@@ -162,4 +162,16 @@ static void add_skippy_f16_turbo4_attention_tests(std::vector<std::unique_ptr<te
             }
         }
     }
+    // GQA4 shared-head reductions: NSG2 and NSG4 padded-tail boundaries.
+    for (int64_t kv : {2049, 4096, 4097}) {
+        for (bool permuted : {false, true}) {
+            for (auto pattern : {test_flash_attn_ext_turbo4_gqa::mask_pattern::NONE,
+                                 test_flash_attn_ext_turbo4_gqa::mask_pattern::PARTIAL,
+                                 test_flash_attn_ext_turbo4_gqa::mask_pattern::ALL}) {
+                for (bool opposed : {false, true}) {
+                    cases.emplace_back(new test_flash_attn_ext_turbo4_gqa(kv, permuted, pattern, opposed, 4, GGML_TYPE_F16));
+                }
+            }
+        }
+    }
 }
