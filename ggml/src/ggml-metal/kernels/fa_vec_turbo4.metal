@@ -236,7 +236,7 @@ kernel void kernel_flash_attn_ext_vec_quartet_kf16_vturbo4_dk128_dv128(
     const short ty = tiisg/8;
 
     // Four independent head regions; global partial-output slots remain per head.
-    const int head_stride = 512*NSG + 256; // half elements
+    const int head_stride = 128 + 320*NSG; // half elements
     threadgroup half * sh0 = shmem_f16;
     threadgroup half * sh1 = shmem_f16 + head_stride;
     threadgroup half * sh2 = shmem_f16 + 2*head_stride;
@@ -245,14 +245,14 @@ kernel void kernel_flash_attn_ext_vec_quartet_kf16_vturbo4_dk128_dv128(
     threadgroup half4 * sq1 = (threadgroup half4 *) sh1;
     threadgroup half4 * sq2 = (threadgroup half4 *) sh2;
     threadgroup half4 * sq3 = (threadgroup half4 *) sh3;
-    threadgroup float * ss0 = (threadgroup float *) (sh0 + 128*NSG + 128*sgitg);
-    threadgroup float * ss1 = (threadgroup float *) (sh1 + 128*NSG + 128*sgitg);
-    threadgroup float * ss2 = (threadgroup float *) (sh2 + 128*NSG + 128*sgitg);
-    threadgroup float * ss3 = (threadgroup float *) (sh3 + 128*NSG + 128*sgitg);
-    threadgroup float4 * so0 = (threadgroup float4 *) (sh0 + 256*NSG + 256*sgitg);
-    threadgroup float4 * so1 = (threadgroup float4 *) (sh1 + 256*NSG + 256*sgitg);
-    threadgroup float4 * so2 = (threadgroup float4 *) (sh2 + 256*NSG + 256*sgitg);
-    threadgroup float4 * so3 = (threadgroup float4 *) (sh3 + 256*NSG + 256*sgitg);
+    threadgroup float * ss0 = (threadgroup float *) (sh0 + 128 + 64*sgitg);
+    threadgroup float * ss1 = (threadgroup float *) (sh1 + 128 + 64*sgitg);
+    threadgroup float * ss2 = (threadgroup float *) (sh2 + 128 + 64*sgitg);
+    threadgroup float * ss3 = (threadgroup float *) (sh3 + 128 + 64*sgitg);
+    threadgroup float4 * so0 = (threadgroup float4 *) (sh0 + 128 + 64*NSG + 256*sgitg);
+    threadgroup float4 * so1 = (threadgroup float4 *) (sh1 + 128 + 64*NSG + 256*sgitg);
+    threadgroup float4 * so2 = (threadgroup float4 *) (sh2 + 128 + 64*NSG + 256*sgitg);
+    threadgroup float4 * so3 = (threadgroup float4 *) (sh3 + 128 + 64*NSG + 256*sgitg);
 
     if (sgitg == 0) {
         sq0[tiisg] = half4(((device const float4 *) (q + head0*args.nb02))[tiisg]);
@@ -421,22 +421,22 @@ kernel void kernel_flash_attn_ext_vec_quartet_kf16_vturbo4_dk128_dv128(
 
     for (short r = NSG/2; r > 0; r >>= 1) {
         if (sgitg < r) {
-            const float m0 = max(ss0[1], ss0[r*64 + 1]);
-            const float m1 = max(ss1[1], ss1[r*64 + 1]);
-            const float m2 = max(ss2[1], ss2[r*64 + 1]);
-            const float m3 = max(ss3[1], ss3[r*64 + 1]);
+            const float m0 = max(ss0[1], ss0[r*32 + 1]);
+            const float m1 = max(ss1[1], ss1[r*32 + 1]);
+            const float m2 = max(ss2[1], ss2[r*32 + 1]);
+            const float m3 = max(ss3[1], ss3[r*32 + 1]);
             const float a0 = exp(ss0[1] - m0);
-            const float b0 = exp(ss0[r*64 + 1] - m0);
+            const float b0 = exp(ss0[r*32 + 1] - m0);
             const float a1 = exp(ss1[1] - m1);
             const float a2 = exp(ss2[1] - m2);
             const float a3 = exp(ss3[1] - m3);
-            const float b1 = exp(ss1[r*64 + 1] - m1);
-            const float b2 = exp(ss2[r*64 + 1] - m2);
-            const float b3 = exp(ss3[r*64 + 1] - m3);
-            const float sum0 = ss0[0]*a0 + ss0[r*64]*b0;
-            const float sum1 = ss1[0]*a1 + ss1[r*64]*b1;
-            const float sum2 = ss2[0]*a2 + ss2[r*64]*b2;
-            const float sum3 = ss3[0]*a3 + ss3[r*64]*b3;
+            const float b1 = exp(ss1[r*32 + 1] - m1);
+            const float b2 = exp(ss2[r*32 + 1] - m2);
+            const float b3 = exp(ss3[r*32 + 1] - m3);
+            const float sum0 = ss0[0]*a0 + ss0[r*32]*b0;
+            const float sum1 = ss1[0]*a1 + ss1[r*32]*b1;
+            const float sum2 = ss2[0]*a2 + ss2[r*32]*b2;
+            const float sum3 = ss3[0]*a3 + ss3[r*32]*b3;
             if (tiisg == 0) {
                 ss0[0] = sum0;
                 ss0[1] = m0;
