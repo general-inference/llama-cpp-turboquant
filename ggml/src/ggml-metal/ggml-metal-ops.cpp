@@ -4035,7 +4035,9 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
 
         auto fa_vec_smem = [&](int64_t nsg, int32_t nqptg) -> size_t {
             if (paired_heads) {
-                return nhptg*(512*nsg + 256)*sizeof(ggml_fp16_t);
+                return nhptg == 4
+                    ? 4*(128 + 320*nsg)*sizeof(ggml_fp16_t)
+                    : 2*(512*nsg + 256)*sizeof(ggml_fp16_t);
             }
             const size_t smem_half = (size_t) (dk_pad + 4*ncpsg + 2*dv_pad)*nqptg*nsg;
             return GGML_PAD(smem_half*sizeof(ggml_fp16_t) + (use_sparse ? (size_t) nsg*ncpsg*sizeof(int) : 0), 16);
@@ -4075,7 +4077,7 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
         }
 
         if (paired_heads && op->src[1]->type == GGML_TYPE_F16 && ne02 == 4*ne12 &&
-            4*(512*nsg + 256)*sizeof(ggml_fp16_t) <= props_dev->max_theadgroup_memory_size) {
+            4*(128 + 320*nsg)*sizeof(ggml_fp16_t) <= props_dev->max_theadgroup_memory_size) {
             nhptg = 4;
         }
 
